@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
 import yaml
 
@@ -170,6 +171,12 @@ def train_loop(
     val_every: int = 0,
     resume_from: Optional[Path] = None,
     seed: int = 42,
+    jepa_loader=None,
+    val_mode: str = "crop",
+    word_root: Optional[str] = None,
+    val_case_ids: Optional[list] = None,
+    val_patch: tuple = (128, 128, 96),
+    val_stride: tuple = (64, 64, 48),
 ) -> Dict[str, Any]:
     model = model.to(device)
     is_jepa_trainer = isinstance(model, UJEPATrainer)
@@ -200,17 +207,22 @@ def train_loop(
     best_path = None
     t0 = time.time()
     data_iter = iter(loader)
+    jepa_iter = iter(jepa_loader) if jepa_loader is not None else None
     n_class = getattr(model, "cfg", None)
     n_class = n_class.class_num if n_class is not None else 17
     start_step = step
     commit = git_commit_sha()
 
-    while step < max_steps:
+    def _next(it, dl):
         try:
-            batch = next(data_iter)
+            return next(it), it
         except StopIteration:
-            data_iter = iter(loader)
-            batch = next(data_iter)
+            it2 = iter(dl)
+            return next(it2), it2
+
+    while step < max_steps:
+        # --- Segmentation batch: always from labeled loader when dual-mode ---
+        batch, data_iter = _next(data_iter, loader)
         if isinstance(batch, (list, tuple)):
             x, y = batch
             is_labeled = torch.ones(x.shape[0], dtype=torch.bool, device=device)
@@ -221,6 +233,15 @@ def train_loop(
         labeled = batch["is_labeled"].to(device).bool()
         if labeled.dim() == 0:
             labeled = labeled.unsqueeze(0)
+
+        # Dual-mode: optional JEPA batch from labeled∪unlabeled train pool
+        x_j = None
+        if jepa_loader is not None:
+            jbatch, jepa_iter = _next(jepa_iter, jepa_loader)
+            if isinstance(jbatch, (list, tuple)):
+                x_j = jbatch[0].to(device)
+            else:
+                x_j = jbatch["image"].to(device)
 
         lj = lambda_j_schedule(step, seg_only_steps, ramp_steps, lambda_j_max)
         opt.zero_grad(set_to_none=True)
@@ -237,7 +258,8 @@ def train_loop(
 
         l_j_val = 0.0
         if is_jepa_trainer and lj > 0:
-            out = model.jepa_step(x)
+            jepa_x = x_j if x_j is not None else x
+            out = model.jepa_step(jepa_x)
             l_j = jepa_smooth_l1(out["pred_tokens"], out["tgt_tokens"], out["visible"])
             (lj * l_j).backward()
             l_j_val = float(l_j.detach().cpu())
@@ -283,16 +305,33 @@ def train_loop(
             )
 
         if (
-            val_loader is not None
+            (val_loader is not None or (val_mode == "whole" and word_root and val_case_ids))
             and val_every > 0
             and (step % val_every == 0 or step == max_steps)
         ):
-            vm = run_validation(model, val_loader, device, n_class)
+            if val_mode == "whole" and word_root and val_case_ids:
+                from ujepa.whole_volume_eval import evaluate_word_whole_volume
+
+                vm = evaluate_word_whole_volume(
+                    model,
+                    word_root,
+                    val_case_ids,
+                    n_class,
+                    val_patch,
+                    val_stride,
+                    device,
+                )
+            else:
+                vm = run_validation(model, val_loader, device, n_class)
             vm["step"] = step
             vm["commit"] = commit
+            vm["val_mode"] = val_mode
             val_history.append(vm)
             md = vm.get("mean_fg_dice", float("nan"))
-            print(f"[val@{step:05d}] mean_fg_dice={md:.4f} n_val={vm.get('n_val_cases')}")
+            print(
+                f"[val@{step:05d}][{val_mode}] mean_fg_dice={md:.4f} "
+                f"n_val={vm.get('n_val_cases')}"
+            )
             if out_dir is not None and md == md and md > best_dice:
                 best_dice = md
                 best_path = out_dir / "best.pt"
@@ -304,7 +343,6 @@ def train_loop(
                     {**rec, "val_mean_fg_dice": md},
                     config=getattr(model, "cfg", None) and model.cfg.to_dict(),
                 )
-            # Restore train mode + EMA eval
             model.train()
             if is_jepa_trainer and model.target is not None:
                 model.target.train(False)
@@ -402,6 +440,77 @@ def build_loader(cfg: UJEPAConfig, raw: Dict[str, Any], seed: int, smoke: bool, 
     )
 
 
+def _read_id_list(path: str | Path) -> list[str]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(p)
+    return [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def build_sll_dual_loaders(cfg: UJEPAConfig, raw: Dict[str, Any], seed: int):
+    """Seg loader from 20 labeled only; JEPA loader from 100 train (L+U).
+
+    Uses npy patch caches produced by cache_sll_patches.py, or synthetic fallback.
+    """
+    data_cfg = raw.get("data", {})
+    train_cfg = raw.get("train", {})
+    batch_size = int(train_cfg.get("batch_size", 2))
+    kind = data_cfg.get("kind", "npy_sll")
+    patch = tuple(data_cfg.get("patch_size", [128, 128, 96]))
+
+    if data_cfg.get("synthetic", False):
+        ds_l = SyntheticWORDLike(n=8, shape=patch, num_classes=cfg.class_num, seed=seed, unlabeled_frac=0.0)
+        ds_j = SyntheticWORDLike(n=16, shape=patch, num_classes=cfg.class_num, seed=seed + 1, unlabeled_frac=0.5)
+        seg_loader = torch.utils.data.DataLoader(ds_l, batch_size=batch_size, shuffle=True, collate_fn=collate_batch)
+        jepa_loader = torch.utils.data.DataLoader(ds_j, batch_size=batch_size, shuffle=True, collate_fn=collate_batch)
+        return seg_loader, jepa_loader, []
+
+    if kind == "npy_sll":
+        root = Path(data_cfg["root"])
+        labeled_ids = _read_id_list(root / "splits" / "train_labeled.txt")
+        jepa_ids = _read_id_list(root / "splits" / "train_all.txt")
+        val_ids = []
+        val_list = data_cfg.get("val_ids_file")
+        if val_list:
+            val_ids = _read_id_list(val_list)
+
+        class SplitNpy(torch.utils.data.Dataset):
+            def __init__(self, ids, require_label: bool):
+                self.ids = ids
+                self.require_label = require_label
+
+            def __len__(self):
+                return len(self.ids)
+
+            def __getitem__(self, idx):
+                cid = self.ids[idx]
+                img = np.load(root / "images" / f"{cid}.npy")
+                image = torch.from_numpy(img.astype("float32"))
+                if image.dim() == 3:
+                    image = image.unsqueeze(0)
+                lab_path = root / "labels" / f"{cid}.npy"
+                if lab_path.exists() and self.require_label:
+                    label = torch.from_numpy(np.load(lab_path).astype("int64"))
+                    is_l = True
+                else:
+                    label = torch.zeros(image.shape[-3:], dtype=torch.long)
+                    is_l = not self.require_label or lab_path.exists()
+                return {
+                    "image": image,
+                    "label": label,
+                    "is_labeled": torch.tensor(bool(is_l and self.require_label), dtype=torch.bool),
+                    "case_id": cid,
+                }
+
+        ds_l = SplitNpy(labeled_ids, require_label=True)
+        ds_j = SplitNpy(jepa_ids, require_label=False)
+        seg_loader = torch.utils.data.DataLoader(ds_l, batch_size=batch_size, shuffle=True, collate_fn=collate_batch)
+        jepa_loader = torch.utils.data.DataLoader(ds_j, batch_size=batch_size, shuffle=True, collate_fn=collate_batch)
+        return seg_loader, jepa_loader, val_ids
+
+    raise SystemExit(f"unsupported data.kind for dual loaders: {kind}")
+
+
 def main():
     p = argparse.ArgumentParser(description="U-JEPANet A0-A3 training")
     p.add_argument("--config", type=str, required=True)
@@ -429,10 +538,31 @@ def main():
     loader = build_loader(cfg, raw, args.seed, args.smoke, split_role="train")
     val_loader = None
     val_every = int(train_cfg.get("val_every", 0))
-    if val_every > 0 or train_cfg.get("do_val", False):
+    jepa_loader = None
+    val_mode = train_cfg.get("val_mode", "crop")
+    word_root = raw.get("data", {}).get("word_root")
+    val_case_ids = []
+    val_patch = tuple(raw.get("data", {}).get("patch_size", [128, 128, 96]))
+    val_stride = tuple(train_cfg.get("val_stride", [64, 64, 48]))
+
+    if train_cfg.get("dual_loader", False):
+        seg_loader, jepa_loader, val_case_ids = build_sll_dual_loaders(cfg, raw, args.seed)
+        loader = seg_loader
+        print(f"[protocol] dual_loader labeled={len(seg_loader.dataset)} jepa={len(jepa_loader.dataset)}")
+        val_mode = train_cfg.get("val_mode", "whole")
+    elif val_every > 0 or train_cfg.get("do_val", False):
         val_loader = build_loader(cfg, raw, args.seed, args.smoke, split_role="val")
         if val_every <= 0:
             val_every = max(1, int(train_cfg.get("max_steps", 100) // 4))
+
+    if val_mode == "whole":
+        if not val_case_ids:
+            vf = raw.get("data", {}).get("val_ids_file")
+            if vf:
+                val_case_ids = _read_id_list(vf)
+        if not word_root or not val_case_ids:
+            raise SystemExit("whole val requires data.word_root and val_case_ids / val_ids_file")
+        print(f"[protocol] whole-volume val on {len(val_case_ids)} cases")
 
     out_dir = Path(args.out or f"runs/{cfg.arm}_{int(time.time())}")
     max_steps = args.max_steps or int(train_cfg.get("max_steps", 50 if args.smoke else 30000))
@@ -452,9 +582,15 @@ def main():
         out_dir=out_dir,
         save_every=int(train_cfg.get("save_every", 0)),
         val_loader=val_loader,
-        val_every=val_every,
+        val_every=val_every if val_mode != "whole" or val_every else int(train_cfg.get("val_every", 2000)),
         resume_from=Path(args.resume) if args.resume else None,
         seed=args.seed,
+        jepa_loader=jepa_loader,
+        val_mode=val_mode,
+        word_root=word_root,
+        val_case_ids=val_case_ids,
+        val_patch=val_patch,
+        val_stride=val_stride,
     )
     print(
         f"done. steps={result['steps']} best_val={result.get('best_mean_fg_dice')} "

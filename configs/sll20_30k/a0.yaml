@@ -1,0 +1,33 @@
+arm: A0
+model:
+  arm: A0
+  in_chns: 1
+  feature_chns: [16, 32, 64, 128]
+  class_num: 17
+  trilinear: true
+  multiscale_pred: true
+  deep_stage: 2
+  norm: instance
+data:
+  synthetic: false
+  kind: npy_sll
+  root: /data/hyc/U-JEPANet/data/word_sll20_cache
+  word_root: /data/hyc/PLS4MIS/code/datasets/WORD
+  val_ids_file: /data/hyc/U-JEPANet/data/splits_sll20/val_20.txt
+  patch_size: [128, 128, 96]
+train:
+  dual_loader: true
+  max_steps: 30000
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  lambda_j_max: 0.0
+  seg_only_steps: 0
+  ramp_steps: 0
+  grad_clip: 1.0
+  batch_size: 2
+  log_every: 100
+  save_every: 5000
+  val_every: 2000
+  val_mode: whole
+  val_stride: [64, 64, 48]
+  do_val: true
