@@ -1,0 +1,41 @@
+arm: A1
+model:
+  arm: A1
+  in_chns: 1
+  feature_chns: [16, 32, 64, 128]
+  class_num: 17
+  trilinear: true
+  multiscale_pred: true
+  deep_stage: 2
+  embed_dim: 256
+  num_heads: 4
+  num_blocks: 4
+  jepa_token_stride: 16
+  alpha_init: 0.1
+  use_cnn_branch: true
+  norm: instance
+data:
+  synthetic: false
+  kind: nifti_word
+  word_root: /data/hyc/PLS4MIS/code/datasets/WORD
+  split: imagesTr
+  label_view: labelsTr_All
+  val_split: imagesVal
+  val_label_view: labelsVal
+  patch_size: [96, 96, 64]
+  max_cases: 20
+  val_max_cases: 8
+  unlabeled_ids: []
+train:
+  max_steps: 3000
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  lambda_j_max: 0.0
+  seg_only_steps: 0
+  ramp_steps: 0
+  grad_clip: 1.0
+  batch_size: 2
+  log_every: 50
+  save_every: 1000
+  val_every: 500
+  do_val: true

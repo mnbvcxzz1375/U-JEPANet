@@ -22,6 +22,12 @@ class EMATarget(nn.Module):
             p.requires_grad_(False)
         self.target.eval()
 
+    def train(self, mode: bool = True):
+        """Keep EMA target in eval even when the parent trainer is set to train()."""
+        super().train(False)
+        self.target.eval()
+        return self
+
     @torch.no_grad()
     def update(self, online: nn.Module, decay: Optional[float] = None) -> None:
         d = self.decay if decay is None else decay

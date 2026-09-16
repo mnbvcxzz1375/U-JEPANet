@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -16,6 +17,7 @@ from ujepa.losses import (
     jepa_smooth_l1,
     lambda_j_schedule,
 )
+from ujepa.metrics import run_validation
 from ujepa.model import UJEPAConfig, UJEPATrainer, build_model
 from ujepa.unet3d import UNet3D
 
@@ -30,9 +32,20 @@ def cfg_from_dict(d: Dict[str, Any]) -> UJEPAConfig:
     return UJEPAConfig(**known)
 
 
-class SyntheticWORDLike(torch.utils.data.Dataset):
-    """CPU/GPU synthetic 3D volumes for smoke / interface tests only."""
+def git_commit_sha() -> str:
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return "unknown"
 
+
+class SyntheticWORDLike(torch.utils.data.Dataset):
     def __init__(
         self,
         n: int = 8,
@@ -85,6 +98,59 @@ def _seg_loss(logits, y, n_class: int) -> torch.Tensor:
     return dice_ce_loss(logits, y, n_class)
 
 
+def save_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    opt: torch.optim.Optimizer,
+    step: int,
+    meta: dict,
+    config: Optional[dict] = None,
+) -> None:
+    payload = {
+        "step": step,
+        "meta": meta,
+        "model": model.state_dict(),
+        "optimizer": opt.state_dict(),
+        "rng": {
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        },
+    }
+    if config is not None:
+        payload["config"] = config
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path)
+
+
+def load_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    opt: Optional[torch.optim.Optimizer] = None,
+    map_location: str | torch.device = "cpu",
+    restore_rng: bool = True,
+) -> int:
+    """Load model/EMA/optimizer/step/RNG. Returns restored step."""
+    ckpt = torch.load(path, map_location=map_location, weights_only=False)
+    model.load_state_dict(ckpt["model"])
+    if opt is not None and "optimizer" in ckpt:
+        opt.load_state_dict(ckpt["optimizer"])
+    if restore_rng and "rng" in ckpt:
+        try:
+            torch.set_rng_state(ckpt["rng"]["torch"].cpu())
+            if ckpt["rng"].get("cuda") is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(
+                    [s.cpu() for s in ckpt["rng"]["cuda"]]
+                )
+        except Exception as e:
+            print(f"[resume] RNG restore skipped: {e}")
+    # Re-assert EMA eval invariant after load.
+    tgt = getattr(model, "target", None)
+    if tgt is not None and hasattr(tgt, "target"):
+        tgt.target.eval()
+        tgt.train(False)
+    return int(ckpt.get("step", 0))
+
+
 def train_loop(
     model: torch.nn.Module,
     loader,
@@ -100,6 +166,10 @@ def train_loop(
     log_every: int = 10,
     out_dir: Optional[Path] = None,
     save_every: int = 0,
+    val_loader=None,
+    val_every: int = 0,
+    resume_from: Optional[Path] = None,
+    seed: int = 42,
 ) -> Dict[str, Any]:
     model = model.to(device)
     is_jepa_trainer = isinstance(model, UJEPATrainer)
@@ -113,13 +183,27 @@ def train_loop(
         params = list(model.parameters())
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
-    history = []
     step = 0
-    t0 = time.time()
+    if resume_from is not None and Path(resume_from).exists():
+        step = load_checkpoint(Path(resume_from), model, opt, map_location=device)
+        print(f"[resume] loaded {resume_from} at step={step}")
+
     model.train()
+    if is_jepa_trainer and model.target is not None:
+        # Critical invariant: EMA teacher stays eval.
+        model.target.train(False)
+        model.target.target.eval()
+
+    history = []
+    val_history = []
+    best_dice = float("-inf")
+    best_path = None
+    t0 = time.time()
     data_iter = iter(loader)
     n_class = getattr(model, "cfg", None)
     n_class = n_class.class_num if n_class is not None else 17
+    start_step = step
+    commit = git_commit_sha()
 
     while step < max_steps:
         try:
@@ -128,7 +212,6 @@ def train_loop(
             data_iter = iter(loader)
             batch = next(data_iter)
         if isinstance(batch, (list, tuple)):
-            # Fallback for raw (x, y) loaders in older tests.
             x, y = batch
             is_labeled = torch.ones(x.shape[0], dtype=torch.bool, device=device)
             batch = {"image": x, "label": y, "is_labeled": is_labeled}
@@ -142,31 +225,22 @@ def train_loop(
         lj = lambda_j_schedule(step, seg_only_steps, ramp_steps, lambda_j_max)
         opt.zero_grad(set_to_none=True)
 
-        # --- Segmentation: only labeled rows ---
         has_labeled = bool(labeled.any().item())
         l_seg_val = 0.0
         if has_labeled:
             x_l = x[labeled]
             y_l = y[labeled]
-            if is_jepa_trainer:
-                logits = model.forward_seg(x_l)
-            else:
-                logits = model(x_l)
+            logits = model.forward_seg(x_l) if is_jepa_trainer else model(x_l)
             l_seg = _seg_loss(logits, y_l, n_class)
             l_seg.backward()
             l_seg_val = float(l_seg.detach().cpu())
-        else:
-            l_seg = torch.zeros((), device=device)
 
-        # --- JEPA: all rows in this batch (image-only) ---
         l_j_val = 0.0
         if is_jepa_trainer and lj > 0:
             out = model.jepa_step(x)
             l_j = jepa_smooth_l1(out["pred_tokens"], out["tgt_tokens"], out["visible"])
             (lj * l_j).backward()
             l_j_val = float(l_j.detach().cpu())
-        else:
-            l_j = torch.zeros((), device=device)
 
         if grad_clip is not None and grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
@@ -174,6 +248,8 @@ def train_loop(
 
         if is_jepa_trainer:
             model.update_ema()
+            model.target.train(False)
+            model.target.target.eval()
 
         step += 1
         rec = {
@@ -182,59 +258,98 @@ def train_loop(
             "l_jepa": l_j_val,
             "lambda_j": float(lj),
             "n_labeled": int(labeled.sum().item()),
+            "commit": commit,
         }
-        if step % log_every == 0 or step == 1:
+        if step % log_every == 0 or step == 1 or step == max_steps:
             history.append(rec)
+            alpha = None
+            if is_jepa_trainer and getattr(model.online, "dualpath", None) is not None:
+                alpha = float(model.online.dualpath.alpha.detach().cpu())
+            extra = f" alpha={alpha:.4f}" if alpha is not None else ""
             print(
                 f"step={step:05d} seg={rec['l_seg']:.4f} jepa={rec['l_jepa']:.4f} "
-                f"lambda={lj:.3f} labeled={rec['n_labeled']}/{len(labeled)}"
+                f"lambda={lj:.3f} labeled={rec['n_labeled']}/{len(labeled)}{extra}"
             )
 
         if out_dir is not None and save_every > 0 and step % save_every == 0:
-            _save_ckpt(out_dir / f"step_{step:06d}.pt", model, opt, step, rec)
+            save_checkpoint(
+                out_dir / f"step_{step:06d}.pt",
+                model,
+                opt,
+                step,
+                rec,
+                config=getattr(model, "cfg", None) and model.cfg.to_dict(),
+            )
+
+        if (
+            val_loader is not None
+            and val_every > 0
+            and (step % val_every == 0 or step == max_steps)
+        ):
+            vm = run_validation(model, val_loader, device, n_class)
+            vm["step"] = step
+            vm["commit"] = commit
+            val_history.append(vm)
+            md = vm.get("mean_fg_dice", float("nan"))
+            print(f"[val@{step:05d}] mean_fg_dice={md:.4f} n_val={vm.get('n_val_cases')}")
+            if out_dir is not None and md == md and md > best_dice:
+                best_dice = md
+                best_path = out_dir / "best.pt"
+                save_checkpoint(
+                    best_path,
+                    model,
+                    opt,
+                    step,
+                    {**rec, "val_mean_fg_dice": md},
+                    config=getattr(model, "cfg", None) and model.cfg.to_dict(),
+                )
+            # Restore train mode + EMA eval
+            model.train()
+            if is_jepa_trainer and model.target is not None:
+                model.target.train(False)
+                model.target.target.eval()
 
     elapsed = time.time() - t0
-    result = {"steps": step, "elapsed_sec": elapsed, "history": history}
+    result = {
+        "steps": step,
+        "start_step": start_step,
+        "elapsed_sec": elapsed,
+        "history": history,
+        "val_history": val_history,
+        "best_mean_fg_dice": best_dice if best_dice > float("-inf") else None,
+        "commit": commit,
+        "device": str(device),
+    }
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        _save_ckpt(out_dir / "last.pt", model, opt, step, history[-1] if history else {})
+        save_checkpoint(
+            out_dir / "last.pt",
+            model,
+            opt,
+            step,
+            history[-1] if history else {},
+            config=getattr(model, "cfg", None) and model.cfg.to_dict(),
+        )
         with open(out_dir / "train_log.json", "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
     return result
 
 
-def _save_ckpt(path: Path, model, opt, step: int, meta: dict) -> None:
-    """Persist online+EMA+predictor via state_dict, plus optimizer/step."""
-    payload = {
-        "step": step,
-        "meta": meta,
-        "model": model.state_dict(),
-        "optimizer": opt.state_dict(),
-        "rng": {
-            "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        },
-    }
-    cfg = getattr(model, "cfg", None)
-    if cfg is not None:
-        payload["config"] = cfg.to_dict()
-    torch.save(payload, path)
-
-
-def build_loader(cfg: UJEPAConfig, raw: Dict[str, Any], seed: int, smoke: bool):
+def build_loader(cfg: UJEPAConfig, raw: Dict[str, Any], seed: int, smoke: bool, split_role: str = "train"):
     data_cfg = raw.get("data", {})
     train_cfg = raw.get("train", {})
     batch_size = int(train_cfg.get("batch_size", 2))
     if smoke or data_cfg.get("synthetic", False):
+        n = 8 if split_role == "train" else 4
         ds = SyntheticWORDLike(
-            n=8,
+            n=n,
             shape=tuple(data_cfg.get("patch_size", [64, 64, 64])),
             num_classes=cfg.class_num,
-            seed=seed,
-            unlabeled_frac=float(data_cfg.get("unlabeled_frac", 0.0)),
+            seed=seed if split_role == "train" else seed + 1,
+            unlabeled_frac=float(data_cfg.get("unlabeled_frac", 0.0)) if split_role == "train" else 0.0,
         )
         return torch.utils.data.DataLoader(
-            ds, batch_size=batch_size, shuffle=True, collate_fn=collate_batch
+            ds, batch_size=batch_size, shuffle=(split_role == "train"), collate_fn=collate_batch
         )
 
     kind = data_cfg.get("kind", "nifti_word")
@@ -244,29 +359,45 @@ def build_loader(cfg: UJEPAConfig, raw: Dict[str, Any], seed: int, smoke: bool):
         root = data_cfg.get("word_root")
         if not root:
             raise SystemExit("data.word_root is required for non-synthetic training")
-        ds = NiftiWordDataset(
-            word_root=root,
-            split=data_cfg.get("split", "imagesTr"),
-            label_view=data_cfg.get("label_view", "labelsTr_All"),
-            patch_size=patch,
-            unlabeled_ids=unlabeled_ids,
-            max_cases=data_cfg.get("max_cases"),
-            seed=seed,
-        )
+        if split_role == "val":
+            ds = NiftiWordDataset(
+                word_root=root,
+                split=data_cfg.get("val_split", "imagesVal"),
+                label_view=data_cfg.get("val_label_view", "labelsVal"),
+                patch_size=patch,
+                unlabeled_ids=[],
+                max_cases=data_cfg.get("val_max_cases"),
+                seed=seed + 1,
+            )
+        else:
+            ds = NiftiWordDataset(
+                word_root=root,
+                split=data_cfg.get("split", "imagesTr"),
+                label_view=data_cfg.get("label_view", "labelsTr_All"),
+                patch_size=patch,
+                unlabeled_ids=unlabeled_ids,
+                max_cases=data_cfg.get("max_cases"),
+                seed=seed,
+            )
     elif kind == "npy":
         root = data_cfg.get("root")
         if not root:
             raise SystemExit("data.root is required for npy datasets")
+        split = data_cfg.get("val_split", "val") if split_role == "val" else data_cfg.get("split", "train")
         ds = NpyVolumeDataset(
             root=root,
-            split=data_cfg.get("split", "train"),
+            split=split,
             patch_size=patch,
-            unlabeled_ids=unlabeled_ids,
+            unlabeled_ids=[] if split_role == "val" else unlabeled_ids,
         )
     else:
         raise SystemExit(f"unknown data.kind={kind}")
     return torch.utils.data.DataLoader(
-        ds, batch_size=batch_size, shuffle=True, collate_fn=collate_batch, num_workers=0
+        ds,
+        batch_size=batch_size,
+        shuffle=(split_role == "train"),
+        collate_fn=collate_batch,
+        num_workers=0,
     )
 
 
@@ -278,6 +409,7 @@ def main():
     p.add_argument("--out", type=str, default=None)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -288,13 +420,23 @@ def main():
 
     model = build_model(cfg)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"arm={cfg.arm} params={n_params:,} class_num={cfg.class_num} device={args.device}")
+    print(
+        f"arm={cfg.arm} params={n_params:,} class_num={cfg.class_num} "
+        f"device={args.device} commit={git_commit_sha()}"
+    )
 
-    loader = build_loader(cfg, raw, args.seed, args.smoke)
+    loader = build_loader(cfg, raw, args.seed, args.smoke, split_role="train")
+    val_loader = None
+    val_every = int(train_cfg.get("val_every", 0))
+    if val_every > 0 or train_cfg.get("do_val", False):
+        val_loader = build_loader(cfg, raw, args.seed, args.smoke, split_role="val")
+        if val_every <= 0:
+            val_every = max(1, int(train_cfg.get("max_steps", 100) // 4))
+
     out_dir = Path(args.out or f"runs/{cfg.arm}_{int(time.time())}")
     max_steps = args.max_steps or int(train_cfg.get("max_steps", 50 if args.smoke else 30000))
 
-    train_loop(
+    result = train_loop(
         model,
         loader,
         torch.device(args.device),
@@ -308,8 +450,15 @@ def main():
         log_every=int(train_cfg.get("log_every", 10)),
         out_dir=out_dir,
         save_every=int(train_cfg.get("save_every", 0)),
+        val_loader=val_loader,
+        val_every=val_every,
+        resume_from=Path(args.resume) if args.resume else None,
+        seed=args.seed,
     )
-    print(f"done. artifacts -> {out_dir}")
+    print(
+        f"done. steps={result['steps']} best_val={result.get('best_mean_fg_dice')} "
+        f"commit={result.get('commit')} artifacts -> {out_dir}"
+    )
 
 
 if __name__ == "__main__":
