@@ -248,8 +248,9 @@ def train_loop(
 
         if is_jepa_trainer:
             model.update_ema()
-            model.target.train(False)
-            model.target.target.eval()
+            if model.target is not None:
+                model.target.train(False)
+                model.target.target.eval()
 
         step += 1
         rec = {
