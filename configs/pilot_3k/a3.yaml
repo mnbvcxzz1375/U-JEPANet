@@ -7,6 +7,7 @@ model:
   trilinear: true
   multiscale_pred: true
   deep_stage: 2
+  norm: instance
   embed_dim: 256
   num_heads: 4
   num_blocks: 4
@@ -16,18 +17,13 @@ model:
   use_cnn_branch: true
   mask_ratio: 0.4
   ema_decay: 0.996
-  norm: instance
 data:
   synthetic: false
-  kind: nifti_word
-  word_root: /data/hyc/PLS4MIS/code/datasets/WORD
-  split: imagesTr
-  label_view: labelsTr_All
-  val_split: imagesVal
-  val_label_view: labelsVal
+  kind: npy
+  root: /data/hyc/U-JEPANet/data/word_pilot_cache
+  split: train
+  val_split: val
   patch_size: [96, 96, 64]
-  max_cases: 20
-  val_max_cases: 8
   unlabeled_ids: []
 train:
   max_steps: 3000

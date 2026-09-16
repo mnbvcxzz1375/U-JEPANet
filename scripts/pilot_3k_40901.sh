@@ -6,6 +6,7 @@ ROOT=/data/hyc/U-JEPANet
 PY=/home/ubuntu/anaconda3/envs/vllmenv/bin/python
 export CUDA_VISIBLE_DEVICES=1
 export PYTHONPATH="$ROOT"
+export PYTHONUNBUFFERED=1
 STAMP=$(date +%Y%m%d_%H%M%S)
 RUN_ROOT="$ROOT/runs/pilot_3k_${STAMP}"
 COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)

@@ -1,5 +1,3 @@
-# 3k pilot — mechanism screening only, not formal 30k.
-# Same seed/split/crop for all arms. Uses a train subset for wall-clock.
 arm: A0
 model:
   arm: A0
@@ -12,15 +10,11 @@ model:
   norm: instance
 data:
   synthetic: false
-  kind: nifti_word
-  word_root: /data/hyc/PLS4MIS/code/datasets/WORD
-  split: imagesTr
-  label_view: labelsTr_All
-  val_split: imagesVal
-  val_label_view: labelsVal
+  kind: npy
+  root: /data/hyc/U-JEPANet/data/word_pilot_cache
+  split: train
+  val_split: val
   patch_size: [96, 96, 64]
-  max_cases: 20
-  val_max_cases: 8
   unlabeled_ids: []
 train:
   max_steps: 3000
