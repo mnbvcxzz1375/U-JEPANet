@@ -24,11 +24,14 @@ U-Net 深层双路 JEPA 半替代实验仓（A0–A3 对照）。
 
 ```
 ujepa/           # 模型与训练组件
-configs/         # A0–A3 配置
+configs/         # A0–A3 / pilot 配置
 train.py         # 训练入口
-tests/           # 形状 / 防泄漏 / 接口测试
+tests/           # 形状 / 防泄漏 / resume / val 测试
+results/         # 可复现 run 的 summary + 分析（同步进 Git）
 EXPERIMENT_PROTOCOL.md
 ```
+
+**结果约定：** 每次筛选/正式运行结束后，把轻量 `summary.json`、`provenance.txt` 与 `ANALYSIS.md` 提交到 `results/<run_id>/`；大 checkpoint 与全量日志留在服务器，并在分析里写明路径。
 
 ## 快速开始
 

@@ -1,0 +1,13 @@
+host=ubuntu-MS-7D25
+commit=unknown
+date=2026-09-16T18:51:15+08:00
+cuda_visible=1
+index, name, memory.used [MiB], memory.total [MiB]
+0, NVIDIA GeForce RTX 4090, 887 MiB, 24564 MiB
+1, NVIDIA GeForce RTX 4090, 21 MiB, 24564 MiB
+torch 2.10.0+cu128 True
+host=ubuntu-MS-7D25
+commit=ab57558
+date=2026-09-16T18:55:38+08:00
+python=/home/ubuntu/anaconda3/envs/vllmenv/bin/python
+torch 2.10.0+cu128 True

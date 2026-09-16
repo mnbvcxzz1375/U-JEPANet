@@ -1,0 +1,54 @@
+{
+  "run_root": "/data/hyc/U-JEPANet/runs/pilot_3k_20260916_185115",
+  "commit": "ab57558",
+  "arms": [
+    {
+      "arm": "a0",
+      "steps": 3000,
+      "commit": "unknown",
+      "elapsed_sec": 170.3366768360138,
+      "last_seg": 0.2729586362838745,
+      "last_jepa": 0.0,
+      "last_lambda": 0.0,
+      "best_val_mean_fg_dice": 0.12267268973899473,
+      "final_val_mean_fg_dice": 0.12267268973899473,
+      "n_val_points": 6
+    },
+    {
+      "arm": "a1",
+      "steps": 3000,
+      "commit": "unknown",
+      "elapsed_sec": 216.86179065704346,
+      "last_seg": 0.5872576832771301,
+      "last_jepa": 0.0,
+      "last_lambda": 0.0,
+      "best_val_mean_fg_dice": 0.11634999297168311,
+      "final_val_mean_fg_dice": 0.11634999297168311,
+      "n_val_points": 6
+    },
+    {
+      "arm": "a2",
+      "steps": 3000,
+      "commit": "unknown",
+      "elapsed_sec": 253.85873746871948,
+      "last_seg": 0.013726468198001385,
+      "last_jepa": 0.11696618050336838,
+      "last_lambda": 0.3,
+      "best_val_mean_fg_dice": 0.1311382590594713,
+      "final_val_mean_fg_dice": 0.12900941930932616,
+      "n_val_points": 6
+    },
+    {
+      "arm": "a3",
+      "steps": 3000,
+      "commit": "unknown",
+      "elapsed_sec": 363.3883056640625,
+      "last_seg": 0.3699829876422882,
+      "last_jepa": 0.06882352381944656,
+      "last_lambda": 0.3,
+      "best_val_mean_fg_dice": 0.13150847547182928,
+      "final_val_mean_fg_dice": 0.13150847547182928,
+      "n_val_points": 6
+    }
+  ]
+}
