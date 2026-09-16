@@ -5,10 +5,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .dualpath_jepa import DualPathDeepModule, JEPAFeatureHead, JEPAPredictor
 from .ema import EMATarget
-from .masking import apply_mask, sample_block_mask
+from .masking import sample_token_mask, token_mask_to_volume_mask
 from .unet3d import UNet3D
 
 
@@ -19,25 +20,27 @@ class UJEPAConfig:
     in_chns: int = 1
     feature_chns: Sequence[int] = field(default_factory=lambda: [16, 32, 64, 128])
     dropout: Optional[Sequence[float]] = None
-    class_num: int = 16
+    # WORD labelsTr_All is 0..16 → 17 classes (bg + 16 organs).
+    class_num: int = 17
     trilinear: bool = True
     multiscale_pred: bool = True
+    norm: str = "instance"  # instance | batch | group
 
-    # Deep stage to enhance / apply JEPA (index into feature_chns / encoder feats).
-    # feats[0] is stem (stride 1), feats[1] stride 2, ...
+    # Deep stage whose CNN output receives the residual (index into encoder feats).
     deep_stage: int = 2
 
-    # Dual-path module
+    # Dual-path / JEPA
     embed_dim: int = 256
     num_heads: int = 4
     num_blocks: int = 4
     predictor_blocks: int = 2
-    image_stride: int = 4
-    feature_downsample: int = 1
+    # JEPA works on a low-res token grid independent of deep_stage.
+    # For 128x128x96 and stride=16 → 8x8x6 = 384 tokens.
+    jepa_token_stride: int = 16
     alpha_init: float = 0.1
-    use_cnn_branch: bool = True  # False => full replacement (A6, not first-round default)
+    use_cnn_branch: bool = True
 
-    # JEPA
+    # JEPA objective
     mask_ratio: float = 0.4
     ema_decay: float = 0.996
     fill_value: float = 0.0
@@ -51,7 +54,7 @@ class UJEPAConfig:
 
     @property
     def uses_dualpath(self) -> bool:
-        return self.arm in ("A1", "A3") or not self.use_cnn_branch
+        return self.arm in ("A1", "A3") or (self.arm not in ("A0", "A2") and not self.use_cnn_branch)
 
     @property
     def uses_jepa(self) -> bool:
@@ -59,11 +62,7 @@ class UJEPAConfig:
 
 
 class UJEPAOnline(nn.Module):
-    """Online network for segmentation (+ optional dual-path deep module).
-
-    JEPA predictor and EMA target are handled by the training wrapper so that
-    inference can drop them cleanly.
-    """
+    """Online network for segmentation (+ optional dual-path deep module)."""
 
     def __init__(self, cfg: UJEPAConfig):
         super().__init__()
@@ -75,6 +74,7 @@ class UJEPAOnline(nn.Module):
             class_num=cfg.class_num,
             trilinear=cfg.trilinear,
             multiscale_pred=cfg.multiscale_pred,
+            norm=cfg.norm,
         )
         self.dualpath: Optional[DualPathDeepModule] = None
         self.jepa_head: Optional[JEPAFeatureHead] = None
@@ -89,22 +89,24 @@ class UJEPAOnline(nn.Module):
                 embed_dim=cfg.embed_dim,
                 num_heads=cfg.num_heads,
                 num_blocks=cfg.num_blocks,
-                image_stride=cfg.image_stride,
-                feature_downsample=cfg.feature_downsample,
+                jepa_token_stride=cfg.jepa_token_stride,
                 alpha_init=cfg.alpha_init,
             )
         if cfg.uses_jepa and not cfg.uses_dualpath:
-            # A2: project existing CNN deep features to JEPA tokens.
             self.jepa_head = JEPAFeatureHead(
                 in_channels=cfg.feature_chns[cfg.deep_stage],
                 embed_dim=cfg.embed_dim,
-                downsample=max(1, cfg.image_stride // (2**cfg.deep_stage)),
+                jepa_token_stride=cfg.jepa_token_stride,
             )
 
-    def _encode_with_optional_dualpath(
+    def jepa_token_grid(self, image_size: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        s = max(1, int(self.cfg.jepa_token_stride))
+        return tuple(max(1, int(dim // s)) for dim in image_size)  # type: ignore[return-value]
+
+    def encode(
         self, x: torch.Tensor, return_aux: bool = False
-    ):
-        """Manual encode so we can inject the dual-path residual at stage s."""
+    ) -> List[torch.Tensor] | Tuple[List[torch.Tensor], Dict[str, Any]]:
+        """Encoder forward with optional dual-path residual. **No decoder.**"""
         b = self.backbone
         s = self.cfg.deep_stage
         feats: List[torch.Tensor] = []
@@ -119,45 +121,59 @@ class UJEPAOnline(nn.Module):
         for i, down in enumerate(downs, start=1):
             cur = down(cur)
             if i == s and self.dualpath is not None:
-                residual = self.dualpath(feats[i - 1], x, return_tokens=return_aux)
+                out = self.dualpath(feats[i - 1], x, return_tokens=return_aux)
                 if return_aux:
-                    residual, dual_tokens, dual_grid = residual
-                if self.cfg.use_cnn_branch:
-                    alpha = self.dualpath.alpha
-                    cur = cur + alpha * residual
+                    residual, dual_tokens, dual_grid = out
                 else:
-                    # Full replacement of this stage's CNN output.
-                    if residual.shape[-3:] != cur.shape[-3:]:
-                        residual = torch.nn.functional.interpolate(
-                            residual, size=cur.shape[-3:], mode="trilinear", align_corners=False
-                        )
+                    residual = out
+                # Always align residual to CNN stage size (decouple grids).
+                if residual.shape[-3:] != cur.shape[-3:]:
+                    residual = F.interpolate(
+                        residual, size=cur.shape[-3:], mode="trilinear", align_corners=False
+                    )
+                if self.cfg.use_cnn_branch:
+                    cur = cur + self.dualpath.alpha * residual
+                else:
                     cur = residual
             feats.append(cur)
 
-        aux = {}
+        aux: Dict[str, Any] = {}
         if return_aux:
+            grid = self.jepa_token_grid(tuple(x.shape[-3:]))
             if self.dualpath is not None:
                 aux["dual_tokens"] = dual_tokens
-                aux["dual_grid"] = dual_grid
+                aux["dual_grid"] = dual_grid if dual_grid is not None else grid
             elif self.jepa_head is not None:
-                aux["dual_tokens"], aux["dual_grid"] = self.jepa_head(feats[s])
-        if return_aux:
+                aux["dual_tokens"], aux["dual_grid"] = self.jepa_head(feats[s], grid)
+            aux["deep_feat"] = feats[s]
             return feats, aux
         return feats
 
     def forward(self, x: torch.Tensor):
-        feats = self._encode_with_optional_dualpath(x, return_aux=False)
+        feats = self.encode(x, return_aux=False)
+        assert isinstance(feats, list)
         return self.backbone.decode(feats)
 
+    def forward_seg(self, x: torch.Tensor):
+        return self.forward(x)
+
     def forward_with_aux(self, x: torch.Tensor):
-        feats, aux = self._encode_with_optional_dualpath(x, return_aux=True)
+        feats, aux = self.encode(x, return_aux=True)
         logits = self.backbone.decode(feats)
-        aux["deep_feat"] = feats[self.cfg.deep_stage]
         return logits, aux
+
+    def encode_jepa_tokens(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int, int]]:
+        """JEPA-only path: encoder features, **no decoder**."""
+        _, aux = self.encode(x, return_aux=True)
+        tokens = aux["dual_tokens"]
+        grid = aux["dual_grid"]
+        if tokens is None or grid is None:
+            raise RuntimeError("encode_jepa_tokens requires dualpath or jepa_head")
+        return tokens, grid
 
 
 class UJEPATrainer(nn.Module):
-    """Holds online network, JEPA predictor, and EMA target for A2/A3."""
+    """Holds online network, JEPA predictor, and EMA target (registered for ckpt)."""
 
     def __init__(self, cfg: UJEPAConfig):
         super().__init__()
@@ -171,12 +187,12 @@ class UJEPATrainer(nn.Module):
                 num_heads=cfg.num_heads,
                 num_blocks=cfg.predictor_blocks,
             )
+            # EMATarget is nn.Module so EMA weights appear in state_dict().
             self.target = EMATarget(self.online, decay=cfg.ema_decay)
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
         if self.target is not None:
-            # Keep EMA target on the same device as the online module.
             device = next(self.online.parameters()).device
             self.target.target = self.target.target.to(device)
         return self
@@ -194,6 +210,9 @@ class UJEPATrainer(nn.Module):
     def forward_seg(self, x: torch.Tensor):
         return self.online.forward(x)
 
+    def forward(self, x: torch.Tensor):
+        return self.forward_seg(x)
+
     def jepa_step(
         self,
         x: torch.Tensor,
@@ -202,55 +221,64 @@ class UJEPATrainer(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """One JEPA forward. Online sees masked X on BOTH paths; target sees clean X.
 
-        Critical no-leakage contract: dual-path / image embed both consume X_mask.
+        Mask is sampled on the **JEPA token grid**, then nearest-upsampled to
+        the CT grid so hidden token ratio ≈ mask_ratio.
         """
         if not self.cfg.uses_jepa or self.target is None or self.predictor is None:
             raise RuntimeError("jepa_step called on a non-JEPA arm")
 
-        b, _, d, h, w = x.shape
+        b = x.shape[0]
+        grid = self.online.jepa_token_grid(tuple(x.shape[-3:]))
         if mask is None:
-            # Mask at the JEPA token grid if available; else input grid.
-            # Using input grid is always safe; interpolate happens inside apply_mask.
-            mask = sample_block_mask(
-                b, (d, h, w), mask_ratio=self.cfg.mask_ratio, generator=generator, device=x.device
+            token_mask = sample_token_mask(
+                b,
+                grid,
+                mask_ratio=self.cfg.mask_ratio,
+                generator=generator,
+                device=x.device,
             )
-        x_mask = apply_mask(x, mask, fill_value=self.cfg.fill_value)
+        elif mask.shape[-3:] == tuple(grid):
+            token_mask = mask.to(x.device)
+        else:
+            # Accept a volume mask and downsample to token grid for ratio bookkeeping.
+            token_mask = F.interpolate(
+                mask.float(), size=grid, mode="nearest"
+            ).to(x.device)
 
-        # Online path with masked input (both branches see X_mask by construction).
-        _, aux_online = self.online.forward_with_aux(x_mask)
-        ctx_tokens = aux_online["dual_tokens"]
-        grid = aux_online["dual_grid"]
-        if grid is None:
-            raise RuntimeError("JEPA online did not return a token grid")
+        vol_mask = token_mask_to_volume_mask(token_mask, tuple(x.shape[-3:]))
+        x_mask = x * vol_mask + self.cfg.fill_value * (1.0 - vol_mask)
 
-        # Build visible token flags from the volume mask at the token grid.
-        vis_vol = torch.nn.functional.interpolate(
-            mask.float(), size=grid, mode="nearest"
-        )  # (B,1,D',H',W')
-        visible = vis_vol.reshape(b, -1) > 0.5  # (B, N)
+        # Online: encoder only (no decoder).
+        ctx_tokens, ctx_grid = self.online.encode_jepa_tokens(x_mask)
+        if tuple(ctx_grid) != tuple(grid):
+            grid = ctx_grid
 
-        # Target tokens from clean image through EMA online.
+        visible = token_mask.reshape(b, -1) > 0.5  # (B, N) on token grid
+
         with torch.no_grad():
-            _, aux_tgt = self.target.target.forward_with_aux(x)
-            tgt_tokens = aux_tgt["dual_tokens"].detach()
+            tgt_tokens, tgt_grid = self.target.target.encode_jepa_tokens(x)
+            tgt_tokens = tgt_tokens.detach()
+            if tuple(tgt_grid) != tuple(grid):
+                # Should not happen with shared cfg; align if it does.
+                raise RuntimeError(f"target grid {tgt_grid} != online grid {grid}")
 
-        pred_tokens = self.predictor(ctx_tokens, visible)
+        pred_tokens = self.predictor(ctx_tokens, visible, grid)
         return {
             "pred_tokens": pred_tokens,
             "tgt_tokens": tgt_tokens,
             "visible": visible,
-            "mask": mask,
+            "token_mask": token_mask,
+            "vol_mask": vol_mask,
+            "grid": grid,
         }
 
 
 def build_model(cfg: UJEPAConfig) -> nn.Module:
-    arm = cfg.arm.upper()
+    arm = str(cfg.arm).upper()
     if arm not in ("A0", "A1", "A2", "A3"):
         raise ValueError(f"Unknown arm {cfg.arm}")
-    # Normalize cfg.arm
     cfg.arm = arm
     if arm == "A0":
-        # A0: plain U-Net only
         return UNet3D(
             in_chns=cfg.in_chns,
             feature_chns=cfg.feature_chns,
@@ -258,13 +286,13 @@ def build_model(cfg: UJEPAConfig) -> nn.Module:
             class_num=cfg.class_num,
             trilinear=cfg.trilinear,
             multiscale_pred=cfg.multiscale_pred,
+            norm=cfg.norm,
         )
     return UJEPATrainer(cfg)
 
 
 def build_online_for_arm(cfg: UJEPAConfig) -> nn.Module:
-    """Return the inference-time module (no predictor / EMA)."""
-    arm = cfg.arm.upper()
+    arm = str(cfg.arm).upper()
     cfg.arm = arm
     if arm == "A0":
         return UNet3D(
@@ -274,5 +302,6 @@ def build_online_for_arm(cfg: UJEPAConfig) -> nn.Module:
             class_num=cfg.class_num,
             trilinear=cfg.trilinear,
             multiscale_pred=cfg.multiscale_pred,
+            norm=cfg.norm,
         )
     return UJEPAOnline(cfg)

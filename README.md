@@ -50,6 +50,20 @@ python train.py --config configs/a3_dualpath_jepa.yaml --smoke
 4. 不把 `JEPA loss 下降` 当作成功标准；以 **A3 相对 A1** 的分割改善为准。
 5. 第一轮不加入 organ token / 多层 JEPA / decoder 预测 / 完全替换 CNN 深层。
 
+## 关键实现约束（2026-09-16 修订）
+
+| 约束 | 做法 |
+|---|---|
+| mask ratio | 在 **JEPA token grid** 上采样，再 nearest 上采样到 CT；保证 hidden≈0.4 |
+| predictor PE | 始终加 3D sin-cos PE：`visible: z+pe`，`masked: q_mask+pe` |
+| token 数 | `jepa_token_stride=16` → 128×128×96 得 **8×8×6=384** tokens |
+| ImageEmbed | strided patch conv（kernel=stride），不再全分辨率 256 通道特征图 |
+| JEPA forward | 只走 encoder，**不跑 decoder** |
+| 半监督 | unlabeled 病例 fail-closed 不读 GT；`L_seg` 只算 labeled rows |
+| EMA | `EMATarget` 为 `nn.Module`，进入 `state_dict` / checkpoint |
+| Norm | 默认 InstanceNorm3d（3D batch=1~2 + clean/masked 混流） |
+| class_num | **17**（WORD `labelsTr_All` = 0..16） |
+
 详见 [EXPERIMENT_PROTOCOL.md](EXPERIMENT_PROTOCOL.md)。
 
 ## 与既有项目关系

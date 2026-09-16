@@ -17,44 +17,44 @@ def test_a0_forward_shapes():
     cfg = UJEPAConfig(
         arm="A0",
         feature_chns=[8, 16, 32, 64],
-        class_num=4,
+        class_num=17,
         embed_dim=48,
         multiscale_pred=False,
     )
     model = build_model(cfg)
     x = torch.randn(2, 1, 32, 32, 32)
     y = model(x)
-    assert y.shape == (2, 4, 32, 32, 32)
+    assert y.shape == (2, 17, 32, 32, 32)
 
 
 def test_a1_dualpath_forward():
     cfg = UJEPAConfig(
         arm="A1",
         feature_chns=[8, 16, 32, 64],
-        class_num=4,
+        class_num=17,
         embed_dim=48,
         num_heads=2,
         num_blocks=2,
-        image_stride=4,
+        jepa_token_stride=8,
         deep_stage=2,
         multiscale_pred=False,
     )
     model = build_model(cfg)
     x = torch.randn(1, 1, 32, 32, 32)
-    out = model.forward_seg(x) if isinstance(model, UJEPATrainer) else model(x)
-    assert out.shape == (1, 4, 32, 32, 32)
+    out = model.forward_seg(x)
+    assert out.shape == (1, 17, 32, 32, 32)
 
 
 def test_a3_jepa_step_shapes_and_ema():
     cfg = UJEPAConfig(
         arm="A3",
         feature_chns=[8, 16, 32, 64],
-        class_num=4,
+        class_num=17,
         embed_dim=48,
         num_heads=2,
         num_blocks=2,
         predictor_blocks=1,
-        image_stride=4,
+        jepa_token_stride=8,
         deep_stage=2,
         multiscale_pred=False,
         mask_ratio=0.5,
@@ -66,23 +66,22 @@ def test_a3_jepa_step_shapes_and_ema():
     n = out["pred_tokens"].shape[1]
     assert out["pred_tokens"].shape == out["tgt_tokens"].shape
     assert out["visible"].shape == (2, n)
-    # Some tokens must be masked.
     assert (~out["visible"]).any()
-    # EMA update runs
     model.update_ema(0.9)
     logits = model.forward_seg(x)
-    assert logits.shape == (1, 4, 32, 32, 32) or logits.shape[0] == 2
+    assert logits.shape[1] == 17
 
 
 def test_a2_inference_drops_predictor():
     cfg = UJEPAConfig(
         arm="A2",
         feature_chns=[8, 16, 32, 64],
-        class_num=4,
+        class_num=17,
         embed_dim=48,
         num_heads=2,
         num_blocks=2,
         predictor_blocks=1,
+        jepa_token_stride=8,
         deep_stage=2,
         multiscale_pred=False,
     )
@@ -97,8 +96,58 @@ def test_a2_inference_drops_predictor():
 
 
 def test_alpha_nonzero_init():
-    cfg = UJEPAConfig(arm="A1", feature_chns=[8, 16, 32, 64], embed_dim=48, num_heads=2, num_blocks=1, class_num=4)
+    cfg = UJEPAConfig(
+        arm="A1",
+        feature_chns=[8, 16, 32, 64],
+        embed_dim=48,
+        num_heads=2,
+        num_blocks=1,
+        class_num=17,
+        jepa_token_stride=8,
+        multiscale_pred=False,
+    )
     model = build_model(cfg)
     dual = model.online.dualpath if isinstance(model, UJEPATrainer) else model.dualpath
     assert dual is not None
     assert abs(float(dual.alpha.detach()) - 0.1) < 1e-6
+
+
+def test_ema_in_state_dict():
+    cfg = UJEPAConfig(
+        arm="A3",
+        feature_chns=[8, 16, 32, 64],
+        class_num=17,
+        embed_dim=48,
+        num_heads=2,
+        num_blocks=1,
+        predictor_blocks=1,
+        jepa_token_stride=8,
+        deep_stage=2,
+        multiscale_pred=False,
+    )
+    model = build_model(cfg)
+    keys = model.state_dict().keys()
+    assert any(k.startswith("target.target.") for k in keys), "EMA target missing from state_dict"
+
+
+def test_word_like_patch_token_budget():
+    """128x128x96 with stride 16 → 8*8*6=384 tokens (in 256-1024)."""
+    cfg = UJEPAConfig(
+        arm="A3",
+        feature_chns=[8, 16, 32, 64],
+        class_num=17,
+        embed_dim=48,
+        num_heads=2,
+        num_blocks=1,
+        predictor_blocks=1,
+        jepa_token_stride=16,
+        deep_stage=2,
+        multiscale_pred=False,
+        mask_ratio=0.4,
+    )
+    model = build_model(cfg)
+    # Shape-only: encode path with smaller embed for speed
+    grid = model.online.jepa_token_grid((128, 128, 96))
+    assert grid == (8, 8, 6)
+    n = 8 * 8 * 6
+    assert 256 <= n <= 1024

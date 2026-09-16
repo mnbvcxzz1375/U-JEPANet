@@ -9,15 +9,34 @@ import torch.nn.functional as F
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout_p: float = 0.0):
+    """Two 3D convs. InstanceNorm by default: batch is typically 1-2 for 3D CT,
+    and the same online encoder sees clean CT (seg) and masked CT (JEPA).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        dropout_p: float = 0.0,
+        norm: str = "instance",
+    ):
         super().__init__()
+
+        def make_norm(c: int) -> nn.Module:
+            if norm == "batch":
+                return nn.BatchNorm3d(c)
+            if norm == "group":
+                groups = 8 if c % 8 == 0 else 1
+                return nn.GroupNorm(groups, c)
+            return nn.InstanceNorm3d(c, affine=True)
+
         self.conv_conv = nn.Sequential(
             nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(out_channels),
+            make_norm(out_channels),
             nn.LeakyReLU(inplace=True),
             nn.Dropout(dropout_p),
             nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(out_channels),
+            make_norm(out_channels),
             nn.LeakyReLU(inplace=True),
         )
 
@@ -26,11 +45,17 @@ class ConvBlock(nn.Module):
 
 
 class DownBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout_p: float = 0.0):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        dropout_p: float = 0.0,
+        norm: str = "instance",
+    ):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool3d(2),
-            ConvBlock(in_channels, out_channels, dropout_p),
+            ConvBlock(in_channels, out_channels, dropout_p, norm=norm),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -45,6 +70,7 @@ class UpBlock(nn.Module):
         out_channels: int,
         dropout_p: float = 0.0,
         trilinear: bool = True,
+        norm: str = "instance",
     ):
         super().__init__()
         self.trilinear = trilinear
@@ -53,7 +79,7 @@ class UpBlock(nn.Module):
             self.up = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=True)
         else:
             self.up = nn.ConvTranspose3d(in_channels1, in_channels2, kernel_size=2, stride=2)
-        self.conv = ConvBlock(in_channels2 * 2, out_channels, dropout_p)
+        self.conv = ConvBlock(in_channels2 * 2, out_channels, dropout_p, norm=norm)
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         if self.trilinear:
@@ -179,37 +205,53 @@ class CrossAttentionBlock(nn.Module):
 
 
 class ImageEmbed3D(nn.Module):
-    """Patchify a volume into tokens at a target spatial grid via strided conv + pool."""
+    """Strided patch embedding — projects and downsamples in one conv.
+
+    Avoids materializing a full-resolution embed_dim feature map before pooling
+    (which OOMs on 128x128x96 with embed_dim=256).
+    """
 
     def __init__(self, in_channels: int, embed_dim: int, target_stride: int):
         super().__init__()
+        if target_stride < 1:
+            raise ValueError("target_stride must be >= 1")
         self.target_stride = target_stride
-        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.AvgPool3d(kernel_size=target_stride, stride=target_stride)
+        # kernel=stride gives non-overlapping patches (ViT-style 3D).
+        self.proj = nn.Conv3d(
+            in_channels,
+            embed_dim,
+            kernel_size=target_stride,
+            stride=target_stride,
+        )
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int, int]]:
         feat = self.proj(x)
-        feat = self.pool(feat)
         tokens, grid = volume_to_tokens(feat)
         return self.norm(tokens), grid
 
 
 class FeatureProj(nn.Module):
-    """Project encoder feature F_{s-1} to token dim, optionally downsample to match image grid."""
+    """Project encoder feature to token dim and resample to a JEPA token grid.
 
-    def __init__(self, in_channels: int, embed_dim: int, downsample: int = 1):
+    ``target_size`` is the JEPA grid (D', H', W'), independent of U-Net stage.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        embed_dim: int,
+        target_size: Optional[Tuple[int, int, int]] = None,
+    ):
         super().__init__()
-        self.downsample = downsample
-        layers = []
-        if downsample > 1:
-            layers.append(nn.AvgPool3d(kernel_size=downsample, stride=downsample))
-        layers.append(nn.Conv3d(in_channels, embed_dim, kernel_size=1))
-        self.net = nn.Sequential(*layers)
+        self.target_size = target_size
+        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=1)
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int, int]]:
-        feat = self.net(x)
+        feat = self.proj(x)
+        if self.target_size is not None and tuple(feat.shape[-3:]) != tuple(self.target_size):
+            feat = F.interpolate(feat, size=self.target_size, mode="trilinear", align_corners=False)
         tokens, grid = volume_to_tokens(feat)
         return self.norm(tokens), grid
 

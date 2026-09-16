@@ -31,16 +31,19 @@
 
 选中深层阶段 `s`（默认 index=2，对应 1/4 分辨率；可配置）。
 
+**JEPA 在独立低分辨率 token 网格上进行**（`jepa_token_stride`，默认 16）：
+对 128×128×96 得到 8×8×6=384 tokens，落在协议要求的 256–1024。
+
 ```
-T_F = Proj(F_{s-1})          # 上一层特征 tokens
-T_X = ImageEmbed(X)          # 图像 tokens（与 T_F 同网格）
+T_F = Proj(F_{s-1}) → resample to JEPA grid
+T_X = StridedPatchEmbed(X, stride=16)
 Z_J = J_theta(T_F, T_X)      # 特征 tokens 作 Query，图像 tokens 作 K/V
-F_s = F_s_CNN + alpha * A(Z_J)
+F_s = F_s_CNN + alpha * A(Z_J)   # residual 始终 resize 到 CNN stage
 ```
 
 - `alpha` 初始化 0.1（非零，保证分割梯度能进入新分支）
 - 输出必须保留三维空间组织，不是全局向量
-- 空间 token 数优先控制在约 256–1024；按实际 patch 与 stage 打印尺寸
+- 遮挡在 **token grid** 上采样，hidden 比例≈`mask_ratio`，再 nearest 上采样到 CT
 
 默认模块超参：
 
@@ -50,7 +53,10 @@ F_s = F_s_CNN + alpha * A(Z_J)
 | 注意力头 | 4 |
 | 交互 block | 4 |
 | predictor block | 2 |
-| 位置编码 | 3D sin-cos 或可学习 |
+| jepa_token_stride | 16 |
+| 位置编码 | 3D sin-cos（encoder 与 **predictor 均使用**） |
+| class_num | 17（0=bg + 16 organs） |
+| norm | InstanceNorm3d |
 
 ### 2.3 仅 JEPA、无双路结构（A2）
 
@@ -72,6 +78,7 @@ Z_ctx = J_theta( Proj(E_{<s}(X_mask)), ImageEmbed(X_mask) )
 ```
 
 两路都必须来自 `X_mask`，禁止：图像分支遮挡、特征分支用完整 `X`。
+JEPA online/target 前向**只跑 encoder**，不跑分割 decoder。
 
 **目标分支：**
 
@@ -79,7 +86,14 @@ Z_ctx = J_theta( Proj(E_{<s}(X_mask)), ImageEmbed(X_mask) )
 Z_tar = B_{EMA}(X)             # 未遮挡 + EMA 参数
 ```
 
-EMA 覆盖形成目标的整条编码路径（前段 + image embed + 深层模块），不只是最后几层。
+EMA 覆盖形成目标的整条编码路径（前段 + image embed + 深层模块），并写入 checkpoint。
+
+**预测器：**
+
+```
+x_i = z_i + PE_i   (visible)
+x_i = q_mask + PE_i (masked)   # 必须带 target position PE
+```
 
 **损失：**
 
@@ -89,19 +103,21 @@ L_J = mean_{i in Omega} SmoothL1( pred_i, sg[ LN(Z_tar_i) ] )
 
 `Omega` 为被遮挡目标位置。第一轮：同 crop、同空间增强，仅在线增加遮挡。
 
-遮挡：三维连续块，初始比例约 40%，**不用器官 GT 生成**。
+遮挡：在 JEPA token grid 上的三维连续块，初始比例约 40%，**不用器官 GT 生成**。
 
 ## 4. 训练目标
 
 ```
-L = L_seg + lambda_J(t) * L_J
+L = L_seg(labeled only) + lambda_J(t) * L_J(all train images)
 ```
 
 - `L_seg = Dice + CE`（可加多尺度深监督，四臂一致）
+- Dataset 对 unlabeled 病例 **fail-closed 不加载 GT**，即使磁盘有 label
+- 优化顺序：seg backward → JEPA backward → clip → step → EMA（避免同时持有两张大图）
 - 节奏：前 3000 步仅分割；随后初始化 EMA=在线，再用 3000 步线性升 `lambda_J`；然后保持
 - 优化器四臂统一：AdamW，lr 2e-4，wd 1e-4，grad clip 1.0
+- checkpoint 含 model（含 EMA submodule）、optimizer、step、RNG
 - 筛选预算：每组约 30,000 更新；正式实验再拉长到基线充分收敛
-- 无标注病例只计 JEPA；有标注病例可同时计 seg
 
 模块职责：
 

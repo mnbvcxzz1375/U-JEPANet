@@ -19,9 +19,10 @@ class UNet3D(nn.Module):
         in_chns: int = 1,
         feature_chns: Sequence[int] = (16, 32, 64, 128),
         dropout: Optional[Sequence[float]] = None,
-        class_num: int = 16,
+        class_num: int = 17,
         trilinear: bool = True,
         multiscale_pred: bool = False,
+        norm: str = "instance",
     ):
         super().__init__()
         self.ft_chns = list(feature_chns)
@@ -32,21 +33,22 @@ class UNet3D(nn.Module):
         self.n_class = class_num
         self.trilinear = trilinear
         self.mul_pred = multiscale_pred
+        self.norm = norm
         assert len(self.ft_chns) in (4, 5)
         assert len(self.dropout) == len(self.ft_chns)
 
-        self.in_conv = ConvBlock(self.in_chns, self.ft_chns[0], self.dropout[0])
-        self.down1 = DownBlock(self.ft_chns[0], self.ft_chns[1], self.dropout[1])
-        self.down2 = DownBlock(self.ft_chns[1], self.ft_chns[2], self.dropout[2])
-        self.down3 = DownBlock(self.ft_chns[2], self.ft_chns[3], self.dropout[3])
+        self.in_conv = ConvBlock(self.in_chns, self.ft_chns[0], self.dropout[0], norm=norm)
+        self.down1 = DownBlock(self.ft_chns[0], self.ft_chns[1], self.dropout[1], norm=norm)
+        self.down2 = DownBlock(self.ft_chns[1], self.ft_chns[2], self.dropout[2], norm=norm)
+        self.down3 = DownBlock(self.ft_chns[2], self.ft_chns[3], self.dropout[3], norm=norm)
         if len(self.ft_chns) == 5:
-            self.down4 = DownBlock(self.ft_chns[3], self.ft_chns[4], self.dropout[4])
+            self.down4 = DownBlock(self.ft_chns[3], self.ft_chns[4], self.dropout[4], norm=norm)
             self.up1 = UpBlock(
-                self.ft_chns[4], self.ft_chns[3], self.ft_chns[3], self.dropout[3], trilinear
+                self.ft_chns[4], self.ft_chns[3], self.ft_chns[3], self.dropout[3], trilinear, norm=norm
             )
-        self.up2 = UpBlock(self.ft_chns[3], self.ft_chns[2], self.ft_chns[2], self.dropout[2], trilinear)
-        self.up3 = UpBlock(self.ft_chns[2], self.ft_chns[1], self.ft_chns[1], self.dropout[1], trilinear)
-        self.up4 = UpBlock(self.ft_chns[1], self.ft_chns[0], self.ft_chns[0], self.dropout[0], trilinear)
+        self.up2 = UpBlock(self.ft_chns[3], self.ft_chns[2], self.ft_chns[2], self.dropout[2], trilinear, norm=norm)
+        self.up3 = UpBlock(self.ft_chns[2], self.ft_chns[1], self.ft_chns[1], self.dropout[1], trilinear, norm=norm)
+        self.up4 = UpBlock(self.ft_chns[1], self.ft_chns[0], self.ft_chns[0], self.dropout[0], trilinear, norm=norm)
         self.out_conv = nn.Conv3d(self.ft_chns[0], self.n_class, kernel_size=1)
         if self.mul_pred:
             self.out_conv1 = nn.Conv3d(self.ft_chns[1], self.n_class, kernel_size=1)

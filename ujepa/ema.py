@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import copy
-from typing import Iterable, List
+from typing import Iterable, Optional
 
 import torch
 import torch.nn as nn
 
 
-class EMATarget:
-    """Exponential moving average copy of an online module.
+class EMATarget(nn.Module):
+    """EMA copy of the online encoder path.
 
-    Target parameters are updated as:
-        target = decay * target + (1 - decay) * online
-    and never receive gradients from the JEPA loss.
+    Registered as a submodule so ``state_dict()`` includes EMA weights for
+    checkpoint/resume. Parameters never receive JEPA gradients.
     """
 
     def __init__(self, online: nn.Module, decay: float = 0.996):
+        super().__init__()
         self.decay = decay
         self.target = copy.deepcopy(online)
         for p in self.target.parameters():
@@ -23,20 +23,23 @@ class EMATarget:
         self.target.eval()
 
     @torch.no_grad()
-    def update(self, online: nn.Module, decay: float | None = None) -> None:
+    def update(self, online: nn.Module, decay: Optional[float] = None) -> None:
         d = self.decay if decay is None else decay
         for t, s in zip(self.target.parameters(), online.parameters()):
             t.data.mul_(d).add_(s.data, alpha=1.0 - d)
-        # Keep buffers (e.g. BN running stats) in sync with online.
         for t, s in zip(self.target.buffers(), online.buffers()):
-            t.data.copy_(s.data)
+            # Skip num_batches_tracked-like integer buffers if any.
+            if t.dtype.is_floating_point:
+                t.data.copy_(s.data)
+            else:
+                t.data.copy_(s.data)
 
     @torch.no_grad()
     def load_online(self, online: nn.Module) -> None:
         self.target.load_state_dict(online.state_dict())
 
-    def to(self, device) -> "EMATarget":
-        self.target = self.target.to(device)
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
         return self
 
     def parameters(self) -> Iterable[nn.Parameter]:
