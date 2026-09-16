@@ -535,7 +535,7 @@ def main():
         f"device={args.device} commit={git_commit_sha()}"
     )
 
-    loader = build_loader(cfg, raw, args.seed, args.smoke, split_role="train")
+    loader = None
     val_loader = None
     val_every = int(train_cfg.get("val_every", 0))
     jepa_loader = None
@@ -546,14 +546,17 @@ def main():
     val_stride = tuple(train_cfg.get("val_stride", [64, 64, 48]))
 
     if train_cfg.get("dual_loader", False):
-        seg_loader, jepa_loader, val_case_ids = build_sll_dual_loaders(cfg, raw, args.seed)
-        loader = seg_loader
-        print(f"[protocol] dual_loader labeled={len(seg_loader.dataset)} jepa={len(jepa_loader.dataset)}")
+        loader, jepa_loader, val_case_ids = build_sll_dual_loaders(cfg, raw, args.seed)
+        print(f"[protocol] dual_loader labeled={len(loader.dataset)} jepa={len(jepa_loader.dataset)}")
         val_mode = train_cfg.get("val_mode", "whole")
-    elif val_every > 0 or train_cfg.get("do_val", False):
-        val_loader = build_loader(cfg, raw, args.seed, args.smoke, split_role="val")
         if val_every <= 0:
-            val_every = max(1, int(train_cfg.get("max_steps", 100) // 4))
+            val_every = int(train_cfg.get("val_every", 2000))
+    else:
+        loader = build_loader(cfg, raw, args.seed, args.smoke, split_role="train")
+        if val_every > 0 or train_cfg.get("do_val", False):
+            val_loader = build_loader(cfg, raw, args.seed, args.smoke, split_role="val")
+            if val_every <= 0:
+                val_every = max(1, int(train_cfg.get("max_steps", 100) // 4))
 
     if val_mode == "whole":
         if not val_case_ids:
@@ -582,7 +585,7 @@ def main():
         out_dir=out_dir,
         save_every=int(train_cfg.get("save_every", 0)),
         val_loader=val_loader,
-        val_every=val_every if val_mode != "whole" or val_every else int(train_cfg.get("val_every", 2000)),
+        val_every=val_every,
         resume_from=Path(args.resume) if args.resume else None,
         seed=args.seed,
         jepa_loader=jepa_loader,
