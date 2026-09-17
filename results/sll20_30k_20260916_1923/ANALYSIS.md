@@ -68,13 +68,22 @@
 3. 未做 A3-L vs A3-LU（无标签增量贡献）消融。
 4. 未与 nnU-Net ResEnc-M / PL-Seg 对照。
 
+## Per-organ correction (2026-09-17)
+
+Earlier organ **names** in the first draft used a wrong WORD map. PLS4MIS order is:
+1 Liver, 2 Spleen, 3 Kidney(L), 4 Kidney(R), 5 Stomach, 6 Gallbladder, 7 Esophagus,
+8 Pancreas, 9 Duodenum, 10 Colon, 11 Intestine, 12 Adrenal, 13 Rectum, 14 Bladder,
+15 Femur(L), 16 Femur(R).
+
+With correct names: **Rectum collapses on JEPA arms (A3−A0 = −0.124)** while
+**Femur(L) improves (+0.038)**. See `MECHANISM_DIAGNOSTICS.md`.
+
 ## Recommended next (if continuing this line)
 
 1. **先接受筛查结论**：不要在未改设计前把 A3 推成主方法。
-2. 若继续：  
-   - 降低 dual-path 分支负担或改融合方式（A1 已偏负）  
-   - λ_J 网格 {0.1, 0.3, 0.5} 或 A2-only 辅助目标  
-   - A3-L vs A3-LU 定量无标签贡献  
+2. 若继续：
+   - **A2-L vs A2-LU**（无标签 80 例是否有贡献）
+   - structure-aware / predictable+residual JEPA，而不是 λ 网格
    - 换更强 backbone 再测，排除“baseline 已够强”
 3. 更干净的下一条主线可能仍是 **PLL / 结构化缺失**（sparq-seg），而不是继续堆 JEPA 半替代。
 

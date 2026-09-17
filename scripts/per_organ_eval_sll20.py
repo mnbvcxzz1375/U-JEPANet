@@ -22,24 +22,24 @@ from ujepa.metrics import dice_per_class
 from ujepa.model import UJEPAConfig, build_model, build_online_for_arm
 from ujepa.whole_volume_eval import sliding_window_logits
 
-# WORD 16 organ names (1-indexed labels)
+# PLS4MIS WORD label order (authoritative for this dataset)
 ORGAN_NAMES = {
     1: "Liver",
-    2: "Right Kidney",
-    3: "Spleen",
-    4: "Pancreas",
-    5: "Aorta",
-    6: "Inferior Vena Cava",
-    7: "Right Adrenal Gland",
-    8: "Left Adrenal Gland",
-    9: "Gallbladder",
-    10: "Esophagus",
-    11: "Stomach",
-    12: "Duodenum",
-    13: "Left Kidney",
+    2: "Spleen",
+    3: "Kidney(L)",
+    4: "Kidney(R)",
+    5: "Stomach",
+    6: "Gallbladder",
+    7: "Esophagus",
+    8: "Pancreas",
+    9: "Duodenum",
+    10: "Colon",
+    11: "Intestine",
+    12: "Adrenal",
+    13: "Rectum",
     14: "Bladder",
-    15: "Rectum",
-    16: "Left Femoral Head",
+    15: "Femur(L)",
+    16: "Femur(R)",
 }
 
 
