@@ -58,23 +58,25 @@ def gaussian_blur(
 ) -> torch.Tensor:
     if torch.rand(1).item() > p:
         return x
-    # separable 3D gaussian blur via depthwise conv
+    squeeze = False
+    if x.dim() == 4:
+        x = x.unsqueeze(0)
+        squeeze = True
+    elif x.dim() != 5:
+        raise ValueError(f"gaussian_blur expects 4D/5D, got {tuple(x.shape)}")
     radius = max(1, int(round(3 * sigma)))
     k = torch.arange(-radius, radius + 1, device=x.device, dtype=x.dtype)
     g = torch.exp(-0.5 * (k / sigma) ** 2)
     g = g / g.sum()
-    c = x.shape[-4] if x.dim() == 5 else 1
-    if x.dim() == 4:
-        x = x.unsqueeze(0)
     b, ch, d, h, w = x.shape
-    # depth
     g1 = g.view(1, 1, -1, 1, 1).expand(ch, 1, -1, 1, 1)
     x = F.conv3d(F.pad(x, (0, 0, 0, 0, radius, radius), mode="replicate"), g1, groups=ch)
     g2 = g.view(1, 1, 1, -1, 1).expand(ch, 1, 1, -1, 1)
     x = F.conv3d(F.pad(x, (0, 0, radius, radius, 0, 0), mode="replicate"), g2, groups=ch)
     g3 = g.view(1, 1, 1, 1, -1).expand(ch, 1, 1, 1, -1)
     x = F.conv3d(F.pad(x, (radius, radius, 0, 0, 0, 0), mode="replicate"), g3, groups=ch)
-    return x.clamp(0, 1)
+    x = x.clamp(0, 1)
+    return x.squeeze(0) if squeeze else x
 
 
 def low_resolution(
@@ -87,9 +89,14 @@ def low_resolution(
     s = scale_range[0] + torch.rand(1).item() * (scale_range[1] - scale_range[0])
     if s >= 0.99:
         return x
+    squeeze = False
+    if x.dim() == 4:
+        x = x.unsqueeze(0)
+        squeeze = True
     size = [max(1, int(round(dim * s))) for dim in x.shape[-3:]]
     y = F.interpolate(x, size=size, mode="trilinear", align_corners=False)
-    return F.interpolate(y, size=x.shape[-3:], mode="trilinear", align_corners=False).clamp(0, 1)
+    y = F.interpolate(y, size=x.shape[-3:], mode="trilinear", align_corners=False).clamp(0, 1)
+    return y.squeeze(0) if squeeze else y
 
 
 def mild_affine(

@@ -174,17 +174,17 @@ class DynamicWordVolumeDataset(Dataset):
             is_l = True
             # shared mild affine for seg only
             if self.mode == "seg" and self.strength > 0:
+                # x is (1,D,H,W); mild_affine expects (B,C,D,H,W)
                 lab_t = label.unsqueeze(0).unsqueeze(0).float()  # (1,1,D,H,W)
-                x, lab_t = mild_affine(x.unsqueeze(0), lab_t, p=0.5)
-                # mild_affine returns x (1,C,D,H,W) and lab (1,D,H,W) when input y was 5d squeezed path
+                x5 = x.unsqueeze(0)  # (1,1,D,H,W)
+                x5, lab_t = mild_affine(x5, lab_t, p=0.5)
                 if lab_t.dim() == 5:
                     label = lab_t[0, 0].long()
                 elif lab_t.dim() == 4:
                     label = lab_t[0].long()
                 else:
                     label = lab_t.long()
-                if x.dim() == 5:
-                    x = x[0]
+                x = x5[0] if x5.dim() == 5 else x5
 
         return {
             "image": x,
