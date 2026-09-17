@@ -218,11 +218,12 @@ class UJEPATrainer(nn.Module):
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
+        x_target: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """One JEPA forward. Online sees masked X on BOTH paths; target sees clean X.
 
-        Mask is sampled on the **JEPA token grid**, then nearest-upsampled to
-        the CT grid so hidden token ratio ≈ mask_ratio.
+        ``x_target`` optional weak/canonical view for the EMA target (C4).
+        When None, target uses the same ``x`` (minus the online mask path).
         """
         if not self.cfg.uses_jepa or self.target is None or self.predictor is None:
             raise RuntimeError("jepa_step called on a non-JEPA arm")
@@ -240,7 +241,6 @@ class UJEPATrainer(nn.Module):
         elif mask.shape[-3:] == tuple(grid):
             token_mask = mask.to(x.device)
         else:
-            # Accept a volume mask and downsample to token grid for ratio bookkeeping.
             token_mask = F.interpolate(
                 mask.float(), size=grid, mode="nearest"
             ).to(x.device)
@@ -255,11 +255,11 @@ class UJEPATrainer(nn.Module):
 
         visible = token_mask.reshape(b, -1) > 0.5  # (B, N) on token grid
 
+        tar_x = x if x_target is None else x_target
         with torch.no_grad():
-            tgt_tokens, tgt_grid = self.target.target.encode_jepa_tokens(x)
+            tgt_tokens, tgt_grid = self.target.target.encode_jepa_tokens(tar_x)
             tgt_tokens = tgt_tokens.detach()
             if tuple(tgt_grid) != tuple(grid):
-                # Should not happen with shared cfg; align if it does.
                 raise RuntimeError(f"target grid {tgt_grid} != online grid {grid}")
 
         pred_tokens = self.predictor(ctx_tokens, visible, grid)
