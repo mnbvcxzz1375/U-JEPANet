@@ -47,6 +47,7 @@ class DynamicWordVolumeDataset(Dataset):
         mode: str = "seg",  # seg | jepa_target | jepa_context | none
         strength: float = 1.0,
         cache_dir: Optional[str | Path] = None,
+        preload: bool = False,
     ):
         self.root = Path(word_root)
         self.ids = list(case_ids)
@@ -61,13 +62,15 @@ class DynamicWordVolumeDataset(Dataset):
         self._g = torch.Generator().manual_seed(seed)
         self.cache_dir = Path(cache_dir) if cache_dir else None
 
-        self._imgs: List[np.ndarray] = []
-        self._labs: List[Optional[np.ndarray]] = []
-        for cid in self.ids:
-            img = self._load_img(cid)
-            lab = self._load_lab(cid) if labeled else None
-            self._imgs.append(img)
-            self._labs.append(lab)
+        # Lazy volume store: do not preload all CTs into RAM.
+        self._img_cache: Dict[str, np.ndarray] = {}
+        self._lab_cache: Dict[str, np.ndarray] = {}
+        self._preload = bool(preload)
+        if self._preload:
+            for cid in self.ids:
+                self._img_cache[cid] = self._load_img(cid)
+                if labeled:
+                    self._lab_cache[cid] = self._load_lab(cid)
 
     def _load_img(self, cid: str) -> np.ndarray:
         if self.cache_dir and (self.cache_dir / f"{cid}_img.npy").exists():
@@ -135,8 +138,21 @@ class DynamicWordVolumeDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | str | bool]:
         cid = self.ids[idx]
-        img = self._imgs[idx]
-        lab = self._labs[idx]
+        if cid in self._img_cache:
+            img = self._img_cache[cid]
+        else:
+            img = self._load_img(cid)
+            if len(self._img_cache) < 8:  # tiny LRU-ish cap
+                self._img_cache[cid] = img
+        if self.labeled:
+            if cid in self._lab_cache:
+                lab = self._lab_cache[cid]
+            else:
+                lab = self._load_lab(cid)
+                if len(self._lab_cache) < 8:
+                    self._lab_cache[cid] = lab
+        else:
+            lab = None
         z0, y0, x0 = self._sample_origin(img, lab)
         crop_hu = self._crop(img, z0, y0, x0)
         x_hu = torch.from_numpy(np.ascontiguousarray(crop_hu)).float().unsqueeze(0)  # (1,D,H,W)
