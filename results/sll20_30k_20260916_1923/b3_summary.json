@@ -1,0 +1,40 @@
+{
+  "protocol": "B3 JEPA-pretrain then seg-FT (JEPA off)",
+  "pre_steps": 8000,
+  "ft_steps": 15000,
+  "best_val": 0.7506644133105367,
+  "val_curve": [
+    {
+      "step": 2000,
+      "mean_fg_dice": 0.35396164899112154
+    },
+    {
+      "step": 4000,
+      "mean_fg_dice": 0.5882510898587653
+    },
+    {
+      "step": 6000,
+      "mean_fg_dice": 0.7392349839354314
+    },
+    {
+      "step": 8000,
+      "mean_fg_dice": 0.7506644133105367
+    },
+    {
+      "step": 10000,
+      "mean_fg_dice": 0.7462143610088037
+    },
+    {
+      "step": 12000,
+      "mean_fg_dice": 0.7427808527268367
+    },
+    {
+      "step": 14000,
+      "mean_fg_dice": 0.7487225915324934
+    },
+    {
+      "step": 15000,
+      "mean_fg_dice": 0.7468313854252624
+    }
+  ]
+}
