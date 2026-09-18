@@ -92,6 +92,34 @@ C3R − A0DA:  −0.000 (s42) / +0.002 (s43)
 C4P − C3R:   +0.002 (s42; paired weak/strong now slightly above C3R)
 ```
 
+## Predictive V1 first results (window, 2026-09-18 night)
+
+| Arm | 机 | val (window) | **test window ALL** | vs A0DA s42 (0.8209) |
+|---|---|---:|---:|---:|
+| A0DA s42 | school | 0.8183 | 0.8209 | — |
+| A0DA s43 | school | 0.8141 | 0.8215 | +0.0006 |
+| **P1 s42** λp=0, pred **in graph** | **40902 GPU0** | **0.8188** | **0.8232** | **+0.0023** |
+| **P2 s42** +pred loss | **40901 GPU1** | **0.8201** | **0.8225** | +0.0016 |
+| C3R s43 | school | 0.8144 | 0.8237 | +0.0028 |
+| C4P s42 | 40901 | 0.8194 | 0.8224 | +0.0015 |
+
+### V1 gates
+
+| Gate | 观察 | 读法 |
+|---|---|---|
+| **P1 − A0DA** | test **+0.0023**，val ≈ +0.0005 | predictor 进图的**结构**至少不差，test 上略好 |
+| **P2 − P1** | test **−0.0007**，val +0.0013 | **pred loss 未再抬 test**；目标仍无可靠额外贡献 |
+| 与旧 A2 对比 | A2 0.8144（无增强 JEPA）远低 | 失败主因不是「predictor 缺席」单一因素；**数据管线仍是主杠杆** |
+
+**当前结论（筛查、单 seed）：**
+
+1. 把 predictor 放进 inference graph **可以追平/略超 A0DA**，但幅度小（~0.002）。
+2. **预测损失仍不增加 test Dice** — 与 C1−A0D、C2−A0DA 方向一致。
+3. P1 vs P2 无法支持「继续调 λ_J / 加强 JEPA loss」。
+4. 学校多 seed（P1/P2 s43、P3 s42）仍在跑；若 P1 优势不稳，应转 **V3 global-local**（信息增量）而不是再堆预测目标。
+
+**资源：** 40901 仅 P2 单卡；40902 仅 P1 单卡；其余在学校 A800。
+
 ### Post-audit conclusion
 
 1. **Dynamic sampling + foreground bias + HU window + CT-med is the real pipeline fix.** A0DA (no JEPA) reaches **0.821–0.822** window test — at or above C2.

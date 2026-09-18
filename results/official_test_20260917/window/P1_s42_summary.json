@@ -1,0 +1,72 @@
+{
+  "arm": "P1",
+  "best_val": 0.818823147618055,
+  "steps": 30000,
+  "lambda_p": 0.0,
+  "use_residual": true,
+  "elapsed_sec": 22039.140403032303,
+  "val_curve": [
+    {
+      "step": 2000,
+      "mean_fg_dice": 0.4077404649314046
+    },
+    {
+      "step": 4000,
+      "mean_fg_dice": 0.5166580223260757
+    },
+    {
+      "step": 6000,
+      "mean_fg_dice": 0.7365324096949011
+    },
+    {
+      "step": 8000,
+      "mean_fg_dice": 0.7985969758354055
+    },
+    {
+      "step": 10000,
+      "mean_fg_dice": 0.7992439673673335
+    },
+    {
+      "step": 12000,
+      "mean_fg_dice": 0.7983816836107286
+    },
+    {
+      "step": 14000,
+      "mean_fg_dice": 0.8063433804759718
+    },
+    {
+      "step": 16000,
+      "mean_fg_dice": 0.8050024743652955
+    },
+    {
+      "step": 18000,
+      "mean_fg_dice": 0.80945528810361
+    },
+    {
+      "step": 20000,
+      "mean_fg_dice": 0.81028247945395
+    },
+    {
+      "step": 22000,
+      "mean_fg_dice": 0.8164821757861765
+    },
+    {
+      "step": 24000,
+      "mean_fg_dice": 0.8174368774760565
+    },
+    {
+      "step": 26000,
+      "mean_fg_dice": 0.818823147618055
+    },
+    {
+      "step": 28000,
+      "mean_fg_dice": 0.8178751004481826
+    },
+    {
+      "step": 30000,
+      "mean_fg_dice": 0.8165308326342149
+    }
+  ],
+  "intensity_mode": "window",
+  "baseline": "A0DA pipeline"
+}
