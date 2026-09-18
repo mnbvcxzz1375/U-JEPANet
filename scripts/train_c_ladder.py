@@ -6,7 +6,8 @@ C1 dynamic crop only
 C2 dynamic + CT-med aug (seg)
 C3 dynamic + same CT-med on JEPA
 C4 dynamic + target weak / context strong
-A0D = pure U-Net + dynamic crop (no JEPA) — control for C1 attribution
+A0D = pure U-Net + dynamic crop (no JEPA)
+A0DA = pure U-Net + dynamic crop + CT-med strength=1 (no JEPA) — missing 2x2 cell
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ def collate(b):
         "image": torch.stack([i["image"] for i in b]),
         "label": torch.stack([i["label"] for i in b]),
         "is_labeled": torch.stack([i["is_labeled"] for i in b]),
+        "case_id": [i.get("case_id", "") for i in b],
     }
 
 
@@ -44,7 +46,7 @@ def seg_loss(logits, y, n):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--arm", required=True, choices=["C1", "C2", "C3", "C4", "A0D"])
+    p.add_argument("--arm", required=True, choices=["C1", "C2", "C3", "C4", "A0D", "A0DA"])
     p.add_argument("--word-root", default="/data/hyc/PLS4MIS/code/datasets/WORD")
     p.add_argument("--split-dir", default="/data/hyc/U-JEPANet/data/splits_sll20")
     p.add_argument("--cache-dir", default="/data/hyc/U-JEPANet/data/word_hu_volumes")
@@ -58,6 +60,8 @@ def main():
     p.add_argument("--ramp", type=int, default=3000)
     p.add_argument("--device", default="cuda")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--intensity-mode", default="window", choices=["window", "minmax"],
+                   help="must match training crop path; dynamic arms use window")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -70,49 +74,71 @@ def main():
     all_ids = labeled + unlabeled
     val_ids = _read_id_list(split / "val_20.txt")
 
-    # A0D: dynamic crop, no intensity aug, no JEPA (matches C1 crop protocol)
+    # Arm → (strength, jepa_mode, use_unet)
     if args.arm == "A0D":
-        strength = 0.0
-        jepa_mode = "none"
+        strength, jepa_mode, use_unet = 0.0, "none", True
+    elif args.arm == "A0DA":
+        strength, jepa_mode, use_unet = 1.0, "none", True  # CT-med on seg, no JEPA
+    elif args.arm == "C1":
+        strength, jepa_mode, use_unet = 0.0, "none", False
+    elif args.arm == "C2":
+        strength, jepa_mode, use_unet = 1.0, "none", False
+    elif args.arm == "C3":
+        # NOTE: historical C3 passed mode=jepa_context which uses jepa_strong_context,
+        # NOT seg_augment_hu — not literally identical to seg aug. Retained as-is.
+        strength, jepa_mode, use_unet = 1.0, "seg", False
+    elif args.arm == "C4":
+        # WARNING: historical C4 used unpaired context/target loaders. Invalid for
+        # weak/strong conclusions. This path now pairs case+crop via paired mode.
+        strength, jepa_mode, use_unet = 1.0, "ws", False
     else:
-        strength = 0.0 if args.arm == "C1" else 1.0
-        jepa_mode = "none"
-        if args.arm == "C3":
-            jepa_mode = "seg"
-        elif args.arm == "C4":
-            jepa_mode = "ws"
+        raise ValueError(args.arm)
 
     seg_ds = DynamicWordVolumeDataset(
         args.word_root, labeled, (128, 128, 96), labeled=True, seed=args.seed,
         mode="seg", strength=strength, cache_dir=args.cache_dir, fg_crop_prob=0.7,
     )
+    it_jt = None
     if jepa_mode == "ws":
+        # Paired weak/strong: single dataset samples case+crop once, then two views.
+        from ujepa.paired_views import PairedJEPADataset
+        jepa_ds = PairedJEPADataset(
+            args.word_root, all_ids, (128, 128, 96), seed=args.seed + 1,
+            cache_dir=args.cache_dir,
+        )
+        jepa_tar_loader = None
+        it_jt = None
+    elif jepa_mode == "seg":
         jepa_ds = DynamicWordVolumeDataset(
             args.word_root, all_ids, (128, 128, 96), labeled=False, seed=args.seed + 1,
-            mode="jepa_context", cache_dir=args.cache_dir,
+            mode="jepa_context", strength=strength, cache_dir=args.cache_dir,
         )
-        jepa_tar_ds = DynamicWordVolumeDataset(
-            args.word_root, all_ids, (128, 128, 96), labeled=False, seed=args.seed + 2,
-            mode="jepa_target", cache_dir=args.cache_dir,
-        )
-        jepa_tar_loader = torch.utils.data.DataLoader(
-            jepa_tar_ds, batch_size=args.batch, shuffle=True, collate_fn=collate
-        )
-        it_jt = iter(jepa_tar_loader)
     else:
         jepa_ds = DynamicWordVolumeDataset(
             args.word_root, all_ids, (128, 128, 96), labeled=False, seed=args.seed + 1,
-            mode="jepa_context" if jepa_mode == "seg" else "none",
-            strength=strength if jepa_mode == "seg" else 0.0,
-            cache_dir=args.cache_dir,
+            mode="none", strength=0.0, cache_dir=args.cache_dir,
         )
-        it_jt = None
 
-    seg_loader = torch.utils.data.DataLoader(seg_ds, batch_size=args.batch, shuffle=True, collate_fn=collate)
-    jepa_loader = torch.utils.data.DataLoader(jepa_ds, batch_size=args.batch, shuffle=True, collate_fn=collate)
+    seg_loader = torch.utils.data.DataLoader(
+        seg_ds, batch_size=args.batch, shuffle=True, collate_fn=collate
+    )
+    if jepa_mode == "ws":
+        def collate_paired(batch):
+            return {
+                "context": torch.stack([b["context"] for b in batch]),
+                "target": torch.stack([b["target"] for b in batch]),
+                "case_id": [b["case_id"] for b in batch],
+            }
+        jepa_loader = torch.utils.data.DataLoader(
+            jepa_ds, batch_size=args.batch, shuffle=True, collate_fn=collate_paired
+        )
+    else:
+        jepa_loader = torch.utils.data.DataLoader(
+            jepa_ds, batch_size=args.batch, shuffle=True, collate_fn=collate
+        )
 
     cfg = UJEPAConfig(
-        arm="A0" if args.arm == "A0D" else "A2",
+        arm="A0" if use_unet else "A2",
         feature_chns=[16, 32, 64, 128], class_num=17, embed_dim=256,
         num_heads=4, num_blocks=4, predictor_blocks=2, jepa_token_stride=16,
         deep_stage=2, multiscale_pred=True, mask_ratio=0.4,
@@ -129,8 +155,8 @@ def main():
     best, history = -1.0, []
     t0 = time.time()
     print(
-        f"arm={args.arm} use_jepa={use_jepa} n_l={len(labeled)} n_j={len(all_ids)} "
-        f"strength={strength} jepa_mode={jepa_mode}",
+        f"arm={args.arm} use_jepa={use_jepa} intensity={args.intensity_mode} "
+        f"n_l={len(labeled)} strength={strength} jepa_mode={jepa_mode}",
         flush=True,
     )
 
@@ -157,17 +183,15 @@ def main():
             except StopIteration:
                 it_j = iter(jepa_loader)
                 bj = next(it_j)
-            xj = bj["image"].to(device)
             lj = lambda_j_schedule(step, args.seg_only, args.ramp, args.lambda_j)
             if lj > 0:
-                x_tar = None
-                if jepa_mode == "ws" and it_jt is not None:
-                    try:
-                        bt = next(it_jt)
-                    except StopIteration:
-                        it_jt = iter(jepa_tar_loader)
-                        bt = next(it_jt)
-                    x_tar = bt["image"].to(device)
+                if jepa_mode == "ws":
+                    xj = bj["context"].to(device)
+                    x_tar = bj["target"].to(device)
+                    # assert paired: same batch size; content pairing guaranteed by dataset
+                else:
+                    xj = bj["image"].to(device)
+                    x_tar = None
                 outj = model.jepa_step(xj, x_target=x_tar)
                 l_j = jepa_smooth_l1(outj["pred_tokens"], outj["tgt_tokens"], outj["visible"])
                 (lj * l_j).backward()
@@ -183,7 +207,8 @@ def main():
         if step % args.val_every == 0 or step == args.steps:
             eval_m = model.online if use_jepa else model
             vm = evaluate_word_whole_volume(
-                eval_m, args.word_root, val_ids, 17, (128, 128, 96), (64, 64, 48), device
+                eval_m, args.word_root, val_ids, 17, (128, 128, 96), (64, 64, 48), device,
+                intensity_mode=args.intensity_mode,
             )
             md = vm["mean_fg_dice"]
             history.append({"step": step, "mean_fg_dice": md})
@@ -195,7 +220,13 @@ def main():
             if md > best:
                 best = md
                 torch.save(
-                    {"model": model.state_dict(), "config": cfg.to_dict(), "step": step},
+                    {
+                        "model": model.state_dict(),
+                        "config": cfg.to_dict(),
+                        "step": step,
+                        "intensity_mode": args.intensity_mode,
+                        "arm": args.arm,
+                    },
                     out / "best.pt",
                 )
 
@@ -203,6 +234,13 @@ def main():
         "arm": args.arm, "best_val": best, "steps": args.steps,
         "elapsed_sec": time.time() - t0, "val_curve": history,
         "strength": strength, "jepa_mode": jepa_mode, "use_jepa": use_jepa,
+        "intensity_mode": args.intensity_mode,
+        "notes": (
+            "C4 historical runs used unpaired loaders; do not use for weak/strong gates."
+            if args.arm == "C4" else
+            "C3 jepa path uses jepa_strong_context, not identical to seg_augment_hu."
+            if args.arm == "C3" else ""
+        ),
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)

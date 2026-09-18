@@ -111,15 +111,21 @@ class DynamicWordVolumeDataset(Dataset):
             y0 = int(np.clip(cy - ph // 2, 0, max(0, h - ph)))
             x0 = int(np.clip(cx - pw // 2, 0, max(0, w - pw)))
         else:
-            # body-ish: skip pure air using intensity percentile on a coarse grid
-            # z-stratified for unlabeled pelvic coverage
-            s = self.z_strata
-            band = int(torch.randint(0, max(1, s), (1,), generator=self._g).item())
-            z_lo = int(band * max(0, d - pd) / max(1, s - 1)) if s > 1 else 0
-            z_hi = int((band + 1) * max(0, d - pd) / max(1, s - 1)) if s > 1 else max(0, d - pd)
-            if z_hi <= z_lo:
-                z_lo, z_hi = 0, max(0, d - pd)
-            z0 = int(torch.randint(z_lo, z_hi + 1, (1,), generator=self._g).item()) if d > pd else 0
+            # Legal full-crop origins: 0 .. max(0, d-pd). Stratify inside that set.
+            max_z0 = max(0, d - pd)
+            s = max(1, int(self.z_strata))
+            if s <= 1 or max_z0 == 0:
+                z0 = int(torch.randint(0, max_z0 + 1, (1,), generator=self._g).item()) if max_z0 > 0 else 0
+            else:
+                # Partition [0, max_z0] into s contiguous bins (inclusive upper).
+                band = int(torch.randint(0, s, (1,), generator=self._g).item())
+                z_lo = (band * max_z0) // s
+                z_hi = ((band + 1) * max_z0) // s
+                if band == s - 1:
+                    z_hi = max_z0
+                if z_hi < z_lo:
+                    z_lo, z_hi = 0, max_z0
+                z0 = int(torch.randint(z_lo, z_hi + 1, (1,), generator=self._g).item())
             y0 = int(torch.randint(0, max(1, h - ph + 1), (1,), generator=self._g).item()) if h >= ph else 0
             x0 = int(torch.randint(0, max(1, w - pw + 1), (1,), generator=self._g).item()) if w >= pw else 0
         return z0, y0, x0

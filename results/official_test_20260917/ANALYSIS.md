@@ -1,103 +1,168 @@
 # Official test complete C-series + attribution
 
-**date:** 2026-09-17  
+**date:** 2026-09-17 (revised after code audit)  
 **protocol:** WORD official `imagesTs` 30 cases, whole-volume 128×128×96 stride 64×64×48  
 **selection:** locked `best.pt` from imagesVal screening; no test-based reselection  
-**authorization:** user, 2026-09-17
+**authorization:** user, 2026-09-17  
+**code base:** `533c1ec` + post-audit fixes (z-strat, intensity_mode, A0DA, paired C4)
 
-## ALL Dice summary
+## Corrected framing (post-audit)
 
-| Arm | crop | CT-med seg | JEPA | val best | **test ALL** | Δ vs A0 |
+These results are **valuable screening evidence that the data pipeline is the main bottleneck**, not a finished causal attribution of JEPA. Three implementation issues affect interpretation:
+
+1. **A0 → A0D is a bundled change**: dynamic resampling + 70% foreground-biased labeled crops + fixed HU window (L=40,W=400), versus fixed cache + uniform crops + per-volume min-max. Cannot claim “dynamic crop alone ≈82%”.
+2. **C4 weak/strong views were unpaired** (two independent datasets/loaders, no shared case/crop). Historical C4 numbers **cannot** reject correctly paired asymmetric JEPA views.
+3. **Train/eval intensity mismatch**: dynamic arms train under windowing; submitted `533c1ec` eval used min-max. Checkpoint selection and reported test scores mix model quality with preprocessing robustness. Window-mode re-eval jobs are in flight.
+
+Also: z-stratified non-fg origins could exceed legal `d-pd` (last band overshot), adding air/padding more often on unlabeled JEPA rows than labeled seg rows. **Fixed** in `dynamic_dataset.py` after the audit; historical runs used the buggy sampler.
+
+## ALL Dice (legacy min-max eval, as first reported)
+
+| Arm | crop | CT-med seg | JEPA | val best | test ALL | Δ vs A0 |
 |---|---|---|---|---:|---:|---:|
 | A0 | fixed | no | no | 0.7617 | 0.7674 | — |
 | A2 | fixed | no | yes | 0.7524 | 0.7636 | −0.0039 |
 | A3 | fixed dual-path | no | yes | 0.7514 | 0.7580 | −0.0094 |
-| A2-LU | fixed | no | yes (20L+80U) | 0.7577 | 0.7700 | +0.0026 |
-| **A0D** | **dynamic** | no | **no** | 0.8042 | **0.8110** | **+0.0436** |
-| C1 | dynamic | no | yes | 0.8050 | 0.8118 | +0.0444 |
-| C2 | dynamic | yes | yes | 0.8105 | 0.8169 | +0.0495 |
-| C4 | dynamic | yes | yes + weak/strong | 0.8177 | 0.8168 | +0.0494 |
-| **C3** | dynamic | yes | yes + same aug | 0.8081 | **0.8203** | **+0.0529** |
+| A2-LU | fixed | no | yes 20L+80U | 0.7577 | 0.7700 | +0.0026 |
+| **A0D** | dynamic+fg+window | no | **no** | 0.8042 | **0.8110** | **+0.0436** |
+| C1 | dynamic+fg+window | no | yes | 0.8050 | 0.8118 | +0.0444 |
+| C2 | + CT-med (incl. mild_affine) | yes | yes | 0.8105 | 0.8169 | +0.0495 |
+| C4 | + unpaired weak/strong | yes | yes | 0.8177 | 0.8168 | +0.0494 |
+| **C3** | + JEPA strong-context | yes | yes | 0.8081 | **0.8203** | **+0.0529** |
 
-## Attribution (test ALL)
+### Case-paired bootstrap (per audit, patient unit, 100k)
 
-```
-A0 fixed, no JEPA          0.7674
-A0D dynamic, no JEPA       0.8110   ← +0.0436 from dynamic crop ALONE
-C1  dynamic + JEPA         0.8118   ← +0.0008 JEPA on top of dynamic crop
-C2  + CT-med (seg)         0.8169   ← +0.0059 vs A0D
-C3  + CT-med (seg+JEPA)    0.8203   ← +0.0093 vs A0D  (best)
-C4  + weak/strong views    0.8168   ← +0.0058 vs A0D  (no extra over C3)
-```
+| Compare | mean ΔDice | 95% CI | cases better/worse |
+|---|---:|---|---|
+| C1 − A0D | +0.00080 | [−0.00403, +0.00562] | 14/16 |
+| C3 − A0D | +0.00929 | [+0.00470, +0.01391] | 21/9 |
+| C3 − C1 | +0.00848 | [+0.00475, +0.01226] | 22/8 |
 
-| Source of gain | Δ test | share of C3−A0 |
-|---|---:|---:|
-| Dynamic crop | +0.0436 | **~82%** |
-| CT-med (seg ± JEPA) | +0.005~0.009 | ~11–18% |
-| JEPA alone (C1−A0D) | +0.0008 | **~2%** |
-| JEPA specialized views (C4−C3) | −0.0035 | **0 / negative** |
+Interpretation: **C1 shows no reliable mean gain over A0D**; C3’s lift is not a single-case artifact. Still single-seed, screening-only.
 
-## Pre-registered gates
+## Pre-registered gates — status after audit
 
-| Gate | Result |
+| Gate | Status |
 |---|---|
-| C1 > C0 | **PASS** (val & test) — fixed crop is the main bottleneck |
-| C2 > C1 | **PASS** (val & test) — CT-med helps |
-| C3 > C2 | **PASS** on test (+0.0034); val C3 < C2 slightly |
-| C4 > C3 | **FAIL** on test (−0.0035) — specialized weak/strong JEPA views not useful |
-| JEPA on dynamic crop (C1 vs A0D) | **~tie** — JEPA not justified by C1 |
+| C1 > C0 | **PASS** on val/test — data-pipeline bundle vs fixed-crop is real |
+| C2 > C1 | **PASS** — but C2 also includes `mild_affine` on labeled seg, not pure CT intensity |
+| C3 > C2 | **PASS** on test; C3 JEPA path uses `jepa_strong_context`, **not** identical to `seg_augment_hu` |
+| C4 > C3 | **INVALID** — unpaired views; does not test weak/strong JEPA hypothesis |
+| JEPA on dyn pipeline (C1 vs A0D) | **Not proven** (CI covers 0) |
 
-## Per-organ (test)
+## Critical missing 2×2 cell
 
-| Organ | A0 | A0D | C1 | C2 | C3 | C4 |
-|---|---:|---:|---:|---:|---:|---:|
-| Liver | 0.937 | ~0.94 | 0.950 | 0.953 | 0.954 | 0.951 |
-| Gallbladder | 0.620 | ~0.71 | 0.719 | 0.707 | 0.711 | 0.661 |
-| Esophagus | 0.631 | ~0.69 | 0.690 | 0.712 | 0.706 | 0.711 |
-| Duodenum | 0.543 | ~0.60 | 0.611 | 0.601 | 0.628 | 0.613 |
-| Adrenal | 0.575 | ~0.62 | 0.619 | 0.632 | 0.632 | 0.607 |
-| **Rectum** | 0.588 | ~0.66 | 0.657 | 0.687 | 0.705 | **0.743** |
-| Femur(L) | 0.846 | ~0.90 | 0.914 | 0.909 | 0.911 | 0.914 |
-
-C4 lifts Rectum highest but loses Gallbladder — ALL ties C2.
-
-## Screening val vs test rank flip (fixed-crop only)
-
-| Arm | val | test |
+|  | no seg aug | with seg aug |
 |---|---|---|
-| A2-L | 0.7641 | 0.7663 |
-| A2-LU | 0.7577 | **0.7700** |
+| **no JEPA** | A0D | **A0DA — in flight (job 383499)** |
+| **with JEPA** | C1 | C2 / C3 |
 
-Val was Gallbladder-heavy (A0 val GB 0.540 vs test 0.620). Do not treat val Δ_U as a test claim.
+We do **not** yet know $M(J=1,A=1)-M(J=0,A=1)$ — whether JEPA still helps after dynamic crop + CT-med. Do not claim “JEPA has no value under good pipeline” until A0DA (and ideally multi-seed) completes under **window** eval.
 
-## Conclusions (screening, single seed, 30k)
+## Complete 2×2 + multi-seed + paired C4 (window test, 2026-09-18)
 
-1. **Dynamic crop is the dominant fix.** A0D alone recovers +0.044 test Dice.
-2. **Current JEPA implementation adds almost nothing on top of dynamic crop** (C1−A0D ≈ +0.001).
-3. **CT intensity augmentation is the second real lever** (+0.006–0.009).
-4. **Specialized JEPA weak/strong views do not help** (C4≤C3 on test).
-5. Dual-path remains closed (A3 −0.009).
-6. A2-LU vs A2-L val ordering did not transfer to test — organ mix, not ALL noise.
+| Arm | JEPA | CT-med | seed | val best (window) | **test ALL (window)** |
+|---|---|---|---|---:|---:|
+| A0 fixed | no | no | 42 | 0.7617* | 0.7519† |
+| A0D | no | no | 42 | 0.8042* | **0.8135** |
+| A0D | no | no | 43 | 0.8043 | 0.8128 |
+| C1 | yes | no | 42 | 0.8050* | 0.8144 |
+| **A0DA** | **no** | **yes** | **42** | **0.8183** | **0.8209** |
+| **A0DA** | **no** | **yes** | **43** | 0.8141 | **0.8215** |
+| C2 | yes | yes | 42 | 0.8105* | 0.8197 |
+| C2 | yes | yes | 43 | 0.8198 | 0.8210 |
+| C3R | yes | yes + strong-ctx | 42 | 0.8170 | 0.8205 |
+| C3R | yes | yes + strong-ctx | 43 | 0.8144 | **0.8237** |
+| **C4P** | yes **paired** ws | yes | 42 | 0.8194 | **0.8224** |
 
-## What this does *not* license
+\* some historical vals were logged under min-max; window-trained rows are the preferred protocol.  
+† A0 fixed was trained on min-max cache; window test is **not** train-consistent for it — use 0.7674 min-max for the historical fixed baseline.
 
-- No test-based hyperparameter selection.
-- No paper claim that JEPA is useless — only that *this* I-JEPA-style deep head, under 30k SLL20, does not beat dynamic-crop + CT-med without it.
-- C3 best (+0.053 vs A0) still lacks multi-seed, HD95/NSD/ASSD, and PL-Seg/nnU-Net comparators.
+### 2×2 JEPA increment (window test)
+
+|  | A=0 | A=1 (CT-med) |
+|---|---|---|
+| **J=0** | A0D ≈ **0.813** | **A0DA ≈ 0.821** |
+| **J=1** | C1 ≈ **0.814** | C2 ≈ **0.820** |
+
+```
+JEPA @ A=0:  C1 − A0D ≈ +0.001   (negligible)
+JEPA @ A=1:  C2 − A0DA ≈ −0.001 / −0.001  (s42 / s43; slightly negative)
+C3R − A0DA:  −0.000 (s42) / +0.002 (s43)
+C4P − C3R:   +0.002 (s42; paired weak/strong now slightly above C3R)
+```
+
+### Post-audit conclusion
+
+1. **Dynamic sampling + foreground bias + HU window + CT-med is the real pipeline fix.** A0DA (no JEPA) reaches **0.821–0.822** window test — at or above C2.
+2. **Current JEPA adds no reliable mean Dice** once the pipeline is good (C2−A0DA ≤ 0 across seeds; C1−A0D ≈ +0.001).
+3. C3R/C4P land within ~0.000–0.002 of A0DA — not enough to justify JEPA complexity at this budget/seed count.
+4. **Correctly paired C4 (C4P)** no longer looks worse than C3R; the old C4 failure was an implementation artifact.
+5. Dual-path remains closed. Historical min-max ranking of A2-LU>A0 is orthogonal to this pipeline result.
+
+**Practical default going forward:** U-Net + dynamic crop + fg-biased + HU window + CT-med, **no JEPA**, until multi-seed with paired C4P or other SSL shows a clear edge.
+
+## Complete window table (2026-09-18)
+
+All dynamic-pipeline arms re-evaluated with `intensity_mode=window` (canonical L=40 W=400).
+
+| Arm | min-max test | **window test** | Δ window−minmax |
+|---|---:|---:|---:|
+| A0D | 0.8110 | **0.8135** | +0.0025 |
+| C1 | 0.8118 | **0.8144** | +0.0026 |
+| C2 | 0.8169 | **0.8197** | +0.0028 |
+| C3 | 0.8203 | **0.8217** | +0.0014 |
+| C4 | 0.8168 | **0.8190** | +0.0022 |
+
+**Window-mode contrasts (preferred going forward):**
+
+```
+C1 − A0D = 0.8144 − 0.8135 = +0.0009   (JEPA without seg-aug; still ~0)
+C2 − A0D = 0.8197 − 0.8135 = +0.0062   (seg-aug bundle; still confounded with JEPA)
+C3 − A0D = 0.8217 − 0.8135 = +0.0082
+C3 − C2  = 0.8217 − 0.8197 = +0.0020
+C4 − C3  = 0.8190 − 0.8217 = −0.0027   (historical C4 still unpaired — invalid for weak/strong gate)
+```
+
+Intensity mismatch was **small (~0.001–0.003)** for these checkpoints — not the main confound, but protocol is now aligned for new runs.
+
+**Still missing for causal JEPA claim:** A0DA = U-Net + dynamic + CT-med + **no JEPA** under window val (job `383499`, early: step ~3.6k, val@2k 0.447). Once complete:
+
+```
+JEPA value under good pipeline = C2_or_C3 − A0DA   (same crop/aug, JEPA on/off)
+```
+
+## In-flight corrections (2026-09-17 night)
+
+| What | Where |
+|---|---|
+| A0DA train (U-Net + dyn + CT-med, no JEPA, window val) | school `383499` gpu02 |
+| Window-intensity official test C3/C4 | 40901 GPU0/1 |
+| Window-intensity official test A0D/C1/C2 | school `383500–383502` gpu_4090 |
+| z-strat fix + `intensity_mode` + paired `PairedJEPADataset` | code on both hosts |
+
+## Per-organ (JSON, legacy min-max test)
+
+A0D vs C1 vs C3 (audit-corrected from JSON):
+
+| Organ | A0D | C1 | C3 | C1−A0D | C3−A0D |
+|---|---:|---:|---:|---:|---:|
+| Rectum | 0.6970 | 0.6573 | 0.7045 | **−0.0396** | +0.0076 |
+| Gallbladder | 0.6837 | 0.7187 | 0.7107 | +0.0350 | +0.0270 |
+| Adrenal | 0.5895 | 0.6192 | 0.6317 | +0.0297 | +0.0422 |
+| Esophagus | 0.7052 | 0.6895 | 0.7061 | −0.0156 | +0.0009 |
+
+C1 Rectum drop is concentrated: `word_0021/0052/0124` explain ~75% of the mean Rectum loss. Prefer case-level failure diagnosis over a global “predictability ≠ discriminability” story for now.
+
+## Conclusions to use going forward
+
+> In single-seed WORD-SLL20 screening, a new data pipeline (dynamic sampling + foreground-biased crops + HU windowing) accounts for most of the performance lift over the fixed-crop baseline. Because A0→A0D bundles multiple factors, that lift cannot yet be attributed to dynamic cropping alone. Without seg augmentation, JEPA shows a small, statistically uncertain mean gain over the new pipeline baseline (C1 vs A0D). With augmentation, C3 reaches higher test Dice on already-trained checkpoints, but the matching no-JEPA control (A0DA) has not been evaluated under a train-consistent intensity contract. C4’s historical numbers do not test weak/strong views because context/target crops were unpaired. Dual-path remains closed.
+
+**Next (user-directed):** run corrected experiments on 40901 dual GPU + school platform — **not** more JEPA architecture complexity.
 
 ## Artifacts
 
-- `results/official_test_20260917/test_{A0,A1,A2,A3,A2-L,A2-LU,A0D,C1,C2,C3,C4}.json`
-- `results/val_percase_20260917/val_*.json`
-- Checkpoints: school `runs/school/ujepa-*`; 40901 `runs/c_ladder_40901/{C3,C4}`
-- Scripts: `eval_official_test.py`, `eval_per_case_val.py`, `deep_dive_*.py`, `school_sbatch_*`, `train_c_ladder.py` (A0D)
-
-## Jobs
-
-| Arm | Host | Job |
-|---|---|---|
-| C1 train/test | school | 381886 / 382955 |
-| C2 train/test | school | 382006 / 383257 |
-| C3/C4 train/test | 40901 | c_ladder_40901 GPU0/1 |
-| A0D train/test | school | 383177 / 383493 |
-| A0–A3/A2-L/LU test | 40901 + school | 382534–382537 |
+- Legacy min-max JSONs remain in this folder (`test_*.json`) — do not overwrite.
+- Window re-eval JSONs → `results/official_test_20260917/window/` once complete.
+- A0DA run → school `runs/school/ujepa-a0da_<jobid>/`.
+- Post-audit code: `ujepa/dynamic_dataset.py`, `ujepa/whole_volume_eval.py`, `ujepa/paired_views.py`, `scripts/train_c_ladder.py` (`A0DA`, intensity_mode), `scripts/eval_official_test.py`.

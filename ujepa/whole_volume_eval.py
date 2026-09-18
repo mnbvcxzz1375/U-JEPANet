@@ -81,16 +81,27 @@ def evaluate_whole_volume_case(
     patch_size: Tuple[int, int, int],
     stride: Tuple[int, int, int],
     device: torch.device,
+    intensity_mode: str = "minmax",
 ) -> Dict[str, float]:
-    """image (1,D,H,W) or (1,1,D,H,W); label (D,H,W)."""
+    """image (1,D,H,W) or (1,1,D,H,W); label (D,H,W).
+
+    intensity_mode:
+      - minmax: (x-min)/(max-min)  [legacy fixed-crop / official PL-Seg style]
+      - window: fixed CT window L=40 W=400  [matches DynamicWordVolumeDataset training]
+    """
     if image.dim() == 3:
         image = image.unsqueeze(0)
     if image.dim() == 4:
         image = image.unsqueeze(0) if image.shape[0] != 1 else image.unsqueeze(1)
-    # normalize like training cache
-    lo = float(image.min())
-    hi = float(image.max())
-    image = (image - lo) / max(hi - lo, 1e-6)
+    if intensity_mode == "window":
+        from .ct_augment import canonical_window
+
+        # image is (1,1,D,H,W); canonical_window expects HU volume
+        image = canonical_window(image)
+    else:
+        lo = float(image.min())
+        hi = float(image.max())
+        image = (image - lo) / max(hi - lo, 1e-6)
     logits = sliding_window_logits(model, image, patch_size, stride, device, num_classes)
     pred = torch.argmax(logits, dim=1)[0].cpu()
     pc = dice_per_class(pred, label.cpu(), num_classes)
@@ -111,8 +122,15 @@ def evaluate_word_whole_volume(
     device: torch.device,
     label_view: str = "labelsVal",
     max_cases: Optional[int] = None,
+    intensity_mode: str = "minmax",
+    image_dir: str = "imagesVal",
 ) -> Dict[str, float]:
-    """Official-style whole-volume val on listed case ids (imagesVal+labelsVal only)."""
+    """Official-style whole-volume val on listed case ids.
+
+    intensity_mode must match how the checkpoint was trained:
+      - minmax for fixed-crop cache arms (A0/A2/A3 historical)
+      - window for DynamicWordVolumeDataset arms (A0D/C*)
+    """
     from pathlib import Path
 
     import SimpleITK as sitk
@@ -127,7 +145,7 @@ def evaluate_word_whole_volume(
     per_class_acc: Dict[int, List[float]] = {c: [] for c in range(1, num_classes)}
     case_means: List[float] = []
     for cid in ids:
-        ip = root / "imagesVal" / f"{cid}.nii.gz"
+        ip = root / image_dir / f"{cid}.nii.gz"
         lp = root / label_view / f"{cid}.nii.gz"
         if not ip.exists() or not lp.exists():
             raise FileNotFoundError(f"missing val case {cid}")
@@ -136,7 +154,8 @@ def evaluate_word_whole_volume(
         image_t = torch.from_numpy(img)[None]  # (1,D,H,W)
         label_t = torch.from_numpy(lab)
         m = evaluate_whole_volume_case(
-            model, image_t, label_t, num_classes, patch_size, stride, device
+            model, image_t, label_t, num_classes, patch_size, stride, device,
+            intensity_mode=intensity_mode,
         )
         for c in range(1, num_classes):
             v = m.get(f"dice_c{c:02d}", float("nan"))

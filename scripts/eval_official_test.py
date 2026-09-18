@@ -128,12 +128,14 @@ def main():
     p.add_argument("--device", default="cuda")
     p.add_argument("--arms", default="", help="comma list; empty = all")
     p.add_argument("--arm-ckpt", default="", help="override e.g. A1=/path/best.pt,A3=/path/best.pt")
+    p.add_argument("--intensity-mode", default="minmax", choices=["minmax", "window"],
+                   help="minmax=legacy PL-Seg style; window=canonical L40/W400 to match dynamic-crop training")
     args = p.parse_args()
 
     device = torch.device(args.device)
     word_root = Path(args.word_root)
     test_ids = [ln.strip() for ln in Path(args.test_ids).read_text().splitlines() if ln.strip()]
-    print(f"n_test={len(test_ids)} device={device}", flush=True)
+    print(f"n_test={len(test_ids)} device={device} intensity={args.intensity_mode}", flush=True)
 
     overrides = parse_arm_overrides(args.arm_ckpt)
     arms = [(n, overrides.get(n.upper(), pth)) for n, pth in DEFAULT_ARMS]
@@ -155,27 +157,59 @@ def main():
         print(f"=== {arm} {ckpt} ===", flush=True)
         t0 = time.time()
         model, cfg = load_arm_model(arm, ckpt_path, device)
-        per, per_case = eval_arm_test(model, word_root, test_ids, cfg.class_num, patch, stride, device)
+        # wrap eval to pass intensity_mode
+        from ujepa.whole_volume_eval import sliding_window_logits
+        import numpy as np
+        import SimpleITK as sitk
+
+        if args.intensity_mode == "window":
+            from ujepa.ct_augment import canonical_window
+        acc = {c: [] for c in range(1, cfg.class_num)}
+        per_case = []
+        for i, cid in enumerate(test_ids):
+            tc0 = time.time()
+            img = sitk.GetArrayFromImage(sitk.ReadImage(str(word_root / "imagesTs" / f"{cid}.nii.gz"))).astype(np.float32)
+            lab = sitk.GetArrayFromImage(sitk.ReadImage(str(word_root / "labelsTs" / f"{cid}.nii.gz"))).astype(np.int64)
+            if args.intensity_mode == "window":
+                vol = canonical_window(torch.from_numpy(img)[None, None])
+            else:
+                lo, hi = float(img.min()), float(img.max())
+                vol = torch.from_numpy(img)[None, None]
+                vol = (vol - lo) / max(hi - lo, 1e-6)
+            logits = sliding_window_logits(model, vol, patch, stride, device, cfg.class_num)
+            pred = torch.argmax(logits, dim=1)[0].cpu()
+            pc = dice_per_class(pred, torch.from_numpy(lab), cfg.class_num)
+            finite = {c: v for c, v in pc.items() if v == v}
+            mean = float(np.mean(list(finite.values()))) if finite else float("nan")
+            for c, v in finite.items():
+                acc[c].append(v)
+            per_case.append({"case": cid, "mean_fg_dice": mean,
+                             "per_class": {str(k): (None if v != v else float(v)) for k, v in pc.items()}})
+            print(f"  [{i+1}/{len(test_ids)}] {cid} mean={mean:.4f} t={time.time()-tc0:.1f}s", flush=True)
+        per = {c: float(np.mean(vs)) if vs else float("nan") for c, vs in acc.items()}
+        vals = [v for v in per.values() if v == v]
+        per["ALL"] = float(np.mean(vals)) if vals else float("nan")
         results[arm] = {
             "per_organ": per,
             "n_test": len(test_ids),
             "elapsed_sec": time.time() - t0,
             "ckpt": ckpt,
             "per_case": per_case,
+            "intensity_mode": args.intensity_mode,
         }
         print(f"{arm} ALL={per['ALL']:.4f} elapsed={time.time()-t0:.1f}s", flush=True)
-        # incremental save
         payload = {
-            "protocol": "WORD official imagesTs/labelsTs whole-volume 128x128x96 stride 64x64x48",
+            "protocol": f"WORD official imagesTs whole-volume 128x128x96 stride 64x64x48 intensity={args.intensity_mode}",
+            "intensity_mode": args.intensity_mode,
             "authorized": "user 2026-09-17",
             "test_ids": test_ids,
             "organ_names": ORGAN_NAMES,
-            "arms": {k: {"per_organ": v["per_organ"], "n_test": v["n_test"], "ckpt": v["ckpt"], "elapsed_sec": v["elapsed_sec"]} for k, v in results.items()},
+            "arms": {k: {"per_organ": v["per_organ"], "n_test": v["n_test"], "ckpt": v["ckpt"],
+                         "elapsed_sec": v["elapsed_sec"], "intensity_mode": v.get("intensity_mode")} for k, v in results.items()},
             "per_case": {k: v["per_case"] for k, v in results.items()},
         }
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    # table
     names = list(results.keys())
     print("\norgan | " + " | ".join(names))
     for c in range(1, 17):
