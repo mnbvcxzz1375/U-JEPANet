@@ -42,8 +42,24 @@ change. Real separability needs **inner band vs outer tissue shell**.
 - **Colon** at r=3 even goes slightly **negative** (outer brighter) — lumen/fat adjacency.
 - Directional range is large for Spleen/Liver/Gallbladder (anisotropy).
 
-## AMOS 22 CT — running (login node CPU, 50/200 at check)
+## AMOS 22 CT — DONE (200 CT train)
 
-## FLARE2023 labeled — running (75/997 at check)
+See `amos_boundary_contrast.md`. Highest CNR kidneys (~1.0–1.15); weakest duodenum/GB.
 
-Artifacts: `word_boundary_contrast.json` · school logs under `runs/school/`
+## FLARE2023 labeled — DONE (997 imagesTr)
+
+See `flare_boundary_contrast.md`. Same pattern: kidneys CNR ~1.0–1.2; gallbladder/stomach/adrenal weak.
+
+## Three-dataset CNR (outer r1) snapshot
+
+| organ | WORD | AMOS | FLARE |
+|---|---:|---:|---:|
+| Kidney L | 0.64 | 1.15 | 1.10 |
+| Kidney R | 0.60 | 1.04 | 1.03 |
+| Liver | 0.47 | 0.66 | 0.63 |
+| Spleen | 0.59 | 0.83 | 0.87 |
+| Gallbladder | 0.19 | 0.33 | 0.14 |
+| Duodenum | 0.19 | 0.27 | 0.23 |
+
+Artifacts: `word_boundary_contrast.json` · `amos_boundary_contrast.json` · `flare_boundary_contrast.json` · school logs under `runs/school/`
+

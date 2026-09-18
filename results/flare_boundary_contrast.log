@@ -1,0 +1,61 @@
+imagesTr subs:
+997
+labelsTr:
+2200
+[flare] cases=997
+  [flare] 1/997
+  [flare] 25/997
+  [flare] 50/997
+  [flare] 75/997
+  [flare] 100/997
+  [flare] 125/997
+  [flare] 150/997
+  [flare] 175/997
+  [flare] 200/997
+  [flare] 225/997
+  [flare] 250/997
+  [flare] 275/997
+  [flare] 300/997
+  [flare] 325/997
+  [flare] 350/997
+  [flare] 375/997
+  [flare] 400/997
+  [flare] 425/997
+  [flare] 450/997
+  [flare] 475/997
+  [flare] 500/997
+  [flare] 525/997
+  [flare] 550/997
+  [flare] 575/997
+  [flare] 600/997
+  [flare] 625/997
+  [flare] 650/997
+  [flare] 675/997
+  [flare] 700/997
+  [flare] 725/997
+  [flare] 750/997
+  [flare] 775/997
+  [flare] 800/997
+  [flare] 825/997
+  [flare] 850/997
+  [flare] 875/997
+  [flare] 900/997
+  [flare] 925/997
+  [flare] 950/997
+  [flare] 975/997
+[flare] WROTE /public/home/heyecheng/U-JEPANet/runs/school/flare_boundary_contrast.json
+[flare] organ                 in    out1      c1   cnr1    out3      c3   cnr3     |g| dir_rng
+[flare] Liver              82.40   13.51   68.89   0.63  -73.69  156.09   0.65   53.16   80.55
+[flare] Kidney(R)          71.38  -12.15   83.53   1.03  -27.65   99.03   1.12   88.62   46.27
+[flare] Spleen             69.31  -36.14  105.45   0.87 -116.08  185.39   0.83   81.38  113.56
+[flare] Pancreas           55.43   30.23   25.20   0.28   21.78   33.65   0.33   47.34   43.59
+[flare] Aorta              82.06   20.34   61.71   0.54  -26.36  108.42   0.60   72.27  118.17
+[flare] IVC                80.43   51.90   28.54   0.36   31.60   48.83   0.43   39.13   63.43
+[flare] Adrenal(R)         12.33   -2.26   14.60   0.22    1.27   11.07   0.23   42.03   87.73
+[flare] Adrenal(L)         12.89  -12.83   25.71   0.42  -22.16   35.05   0.52   46.00   60.39
+[flare] Gallbladder        15.97    4.07   11.90   0.14    4.96   11.00   0.13   37.22   86.58
+[flare] Esophagus          24.09   -1.75   25.84   0.21  -24.96   49.06   0.25   48.96   80.89
+[flare] Stomach             4.71   -3.91    8.63   0.17  -20.17   24.88   0.25   54.79   67.60
+[flare] Duodenum           35.39   20.63   14.76   0.23   11.02   24.37   0.30   45.20   49.39
+[flare] Kidney(L)          64.90  -21.14   86.04   1.10  -39.35  104.26   1.24   90.68   37.51
+DONE
