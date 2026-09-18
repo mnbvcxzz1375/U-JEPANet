@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-"""V1.1 Corrected Predictive-Residual bottleneck.
+"""V1.2 Corrected Predictive Bottleneck (post user review of 4b7971f).
 
-Fixes vs V1:
-- Segmentation forward is ALWAYS full-context (train == inference semantics).
-- `model.eval()` automatically disables stochastic masking (no train_mode arg needed).
-- Predictive loss uses a separate masked aux branch, loss only on masked tokens.
-- Tokens are pooled to a low-res grid (default 8x8x6) before attention.
+P0-1: F2* must feed E3 (deep path), not only decoder skip.
+P0-2: L_P on original F2; context NOT detached; target stop-grad → encoder
+      receives predictive gradient.
+
+Graph (locked):
+  X → E0 → E1 → F2
+       ├─ B_full(F2) → F2* → E3 → F3* → Decoder(F0,F1,F2*,F3*)
+       └─ B_mask(F2) → L_P   (context grad, target sg)
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -19,22 +22,25 @@ from .dualpath_jepa import JEPAPredictor, tokens_from_volume
 from .unet3d import UNet3D
 
 
-def _target_grid(spatial: Tuple[int, int, int], target_tokens: int = 384) -> Tuple[int, int, int]:
-    """Pick a D,H,W grid with ~target_tokens cells, preferring /4 then /8."""
+def target_grid_384(spatial: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Explicit grid for WORD-style 128x128x96 stage-2 → 8x8x6=384 tokens.
+
+    For other sizes: pick the /div grid closest to 384 tokens without exceeding 3*384.
+    """
     d, h, w = spatial
+    if (d, h, w) == (32, 32, 24):
+        return (8, 8, 6)
+    best = (max(1, d // 4), max(1, h // 4), max(1, w // 4))
+    best_n = best[0] * best[1] * best[2]
     for div in (2, 4, 8, 16):
-        gd, gh, gw = max(1, d // div), max(1, h // div), max(1, w // div)
-        if gd * gh * gw <= max(target_tokens * 2, 64) and gd * gh * gw >= max(32, target_tokens // 8):
-            # refine toward target_tokens
-            pass
-        if gd * gh * gw <= target_tokens * 3:
-            return gd, gh, gw
-    return max(1, d // 8), max(1, h // 8), max(1, w // 8)
+        g = (max(1, d // div), max(1, h // div), max(1, w // div))
+        n = g[0] * g[1] * g[2]
+        if n <= 384 * 3 and abs(n - 384) < abs(best_n - 384):
+            best, best_n = g, n
+    return best
 
 
 class PredictiveBottleneck(nn.Module):
-    """Pool F_s -> Z (low-res tokens) -> full-context predict -> merge -> F_s*."""
-
     def __init__(
         self,
         in_channels: int,
@@ -55,88 +61,76 @@ class PredictiveBottleneck(nn.Module):
         self.predictor = JEPAPredictor(embed_dim=embed_dim, num_heads=num_heads, num_blocks=predictor_blocks)
         merge_in = embed_dim * (3 if use_residual else 2)
         self.merge = nn.Conv3d(merge_in, in_channels, kernel_size=1)
-        self.last_aux: Dict[str, torch.Tensor] = {}
 
-    def _pool_to_grid(self, vol: torch.Tensor, grid: Tuple[int, int, int]) -> torch.Tensor:
-        if tuple(vol.shape[-3:]) == tuple(grid):
-            return vol
-        return F.adaptive_avg_pool3d(vol, grid)
+    def _pool(self, vol: torch.Tensor, grid: Tuple[int, int, int]) -> torch.Tensor:
+        return vol if tuple(vol.shape[-3:]) == tuple(grid) else F.adaptive_avg_pool3d(vol, grid)
 
-    def _upsample_to(self, vol: torch.Tensor, size: Tuple[int, int, int]) -> torch.Tensor:
-        if tuple(vol.shape[-3:]) == tuple(size):
-            return vol
-        return F.interpolate(vol, size=size, mode="trilinear", align_corners=False)
+    def _up(self, vol: torch.Tensor, size: Tuple[int, int, int]) -> torch.Tensor:
+        return vol if tuple(vol.shape[-3:]) == tuple(size) else F.interpolate(
+            vol, size=size, mode="trilinear", align_corners=False
+        )
 
-    def _sample_visible(self, b: int, grid: Tuple[int, int, int], device) -> torch.Tensor:
-        d, h, w = grid
-        n = d * h * w
-        n_mask = max(1, int(round(self.mask_ratio * n)))
-        visible = torch.ones(b, n, dtype=torch.bool, device=device)
-        for i in range(b):
-            idx = torch.randperm(n, device=device)[:n_mask]
-            visible[i, idx] = False
-        return visible.view(b, d, h, w)
+    def encode_tokens(self, f2: torch.Tensor, grid: Optional[Tuple[int, int, int]] = None):
+        b, c, d, h, w = f2.shape
+        if grid is None:
+            grid = target_grid_384((d, h, w))
+        vol = self.proj(f2)
+        z_vol = self._pool(vol, grid)
+        tokens = self.norm(tokens_from_volume(z_vol))
+        return tokens, grid, (d, h, w)
 
-    def forward(self, feat: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Always full-context for the seg path. Deterministic under eval()."""
-        b, c, d, h, w = feat.shape
-        grid = _target_grid((d, h, w), self.target_tokens)
-        vol = self.proj(feat)
-        z_vol = self._pool_to_grid(vol, grid)  # (B,E,gd,gh,gw)
-        tokens = self.norm(tokens_from_volume(z_vol))  # (B,N,E)
+    def full_context_forward(self, f2: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Seg path: always P(Z, 1). Deterministic under eval()."""
+        tokens, grid, spatial = self.encode_tokens(f2)
+        b = tokens.shape[0]
         n = tokens.shape[1]
-        # Full context: all tokens visible — same path for train and infer
-        vis_all = torch.ones(b, n, dtype=torch.bool, device=feat.device)
-        pred_tokens = self.predictor(tokens, vis_all, grid)
+        vis_all = torch.ones(b, n, dtype=torch.bool, device=f2.device)
+        pred = self.predictor(tokens, vis_all, grid)
 
-        def to_vol(tok: torch.Tensor) -> torch.Tensor:
+        def to_vol(tok):
             gd, gh, gw = grid
             return tok.transpose(1, 2).reshape(b, self.embed_dim, gd, gh, gw)
 
-        z_back = self._upsample_to(to_vol(tokens), (d, h, w))
-        zhat_back = self._upsample_to(to_vol(pred_tokens), (d, h, w))
+        d, h, w = spatial
+        z_b = self._up(to_vol(tokens), (d, h, w))
+        zhat_b = self._up(to_vol(pred), (d, h, w))
         if self.use_residual:
-            r_back = z_back - zhat_back
-            cat = torch.cat([z_back, zhat_back, r_back], dim=1)
+            cat = torch.cat([z_b, zhat_b, z_b - zhat_b], dim=1)
         else:
-            cat = torch.cat([z_back, zhat_back], dim=1)
-        f_star = self.merge(cat)
-        aux = {
-            "z_tokens": tokens.detach(),
-            "pred_tokens": pred_tokens,
-            "grid": torch.tensor(grid, device=feat.device),
-        }
-        self.last_aux = aux
-        return feat + f_star, aux
+            cat = torch.cat([z_b, zhat_b], dim=1)
+        f2_star = f2 + self.merge(cat)
+        aux = {"z": tokens, "pred_full": pred, "grid": grid}
+        return f2_star, aux
 
-    def masked_pred_loss(self, feat: torch.Tensor) -> torch.Tensor:
-        """Auxiliary masked prediction; loss only on masked positions.
+    def masked_pred_loss(self, f2_base: torch.Tensor) -> torch.Tensor:
+        """P0-2: run on ORIGINAL F2; context keeps grad; target stop-grad.
 
-        Does NOT affect the segmentation feature path (separate forward).
+        ∇θ_E L_P ≠ 0 via visible context tokens → predictor.
+        ∇θ_proj L_P ≠ 0 via context path.
+        ∇θ_P L_P ≠ 0 via predictor.
         """
-        if not self.training or self.mask_ratio <= 0:
-            return feat.new_zeros(())
-        b, c, d, h, w = feat.shape
-        grid = _target_grid((d, h, w), self.target_tokens)
-        with torch.no_grad():
-            vol = self.proj(feat)
-            z_vol = self._pool_to_grid(vol, grid)
-            z_tok = self.norm(tokens_from_volume(z_vol)).detach()
-        # recompute proj for grad into predictor only (proj can stay frozen for this aux)
-        vis2d = self._sample_visible(b, grid, feat.device)
-        visible = vis2d.reshape(b, -1)
-        # predictor input: visible tokens keep z, masked use mask_token via visible flag
-        pred = self.predictor(z_tok, visible, grid)
-        masked = ~visible  # (B,N)
+        if self.mask_ratio <= 0:
+            return f2_base.new_zeros(())
+        # context tokens: NO detach → encoder/proj receive gradient
+        tokens, grid, _ = self.encode_tokens(f2_base)
+        z_target = tokens.detach()
+        b, n, _ = tokens.shape
+        gd, gh, gw = grid
+        n_mask = max(1, int(round(self.mask_ratio * n)))
+        visible = torch.ones(b, n, dtype=torch.bool, device=f2_base.device)
+        for i in range(b):
+            idx = torch.randperm(n, device=f2_base.device)[:n_mask]
+            visible[i, idx] = False
+        pred = self.predictor(tokens, visible, grid)  # tokens = live context
+        masked = ~visible
         if not masked.any():
-            return feat.new_zeros(())
-        # Huber / SmoothL1 only on masked
-        diff = F.smooth_l1_loss(pred, z_tok, reduction="none").mean(-1)  # (B,N)
+            return f2_base.new_zeros(())
+        diff = F.smooth_l1_loss(pred, z_target, reduction="none").mean(-1)
         return diff[masked].mean()
 
 
 class PredictiveUNet(nn.Module):
-    """U-Net + corrected full-context predictive bottleneck at deep_stage."""
+    """P0-1: bottleneck sits ON the deep path — E3 consumes F2*."""
 
     def __init__(
         self,
@@ -151,9 +145,11 @@ class PredictiveUNet(nn.Module):
         target_tokens: int = 384,
         multiscale_pred: bool = True,
         norm: str = "instance",
-        dropout: Optional[list] = None,
+        dropout: Optional[List[float]] = None,
     ):
         super().__init__()
+        if deep_stage != 2:
+            raise ValueError("V1.2 locks deep_stage=2 (E2 → bottleneck → E3)")
         self.cfg_deep_stage = deep_stage
         self.backbone = UNet3D(
             in_chns=1,
@@ -175,18 +171,32 @@ class PredictiveUNet(nn.Module):
         )
         self.last_aux: Dict[str, torch.Tensor] = {}
         self._last_pred_loss: Optional[torch.Tensor] = None
+        self._last_f2_base: Optional[torch.Tensor] = None
+        self._last_f2_star: Optional[torch.Tensor] = None
+        self._last_f3: Optional[torch.Tensor] = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feats = self.backbone.encode(x)
-        s = self.cfg_deep_stage
-        f_s, aux = self.bottleneck(feats[s])
-        feats[s] = f_s
+        bb = self.backbone
+        # Stage-by-stage encode so E3 sees F2*
+        x0 = bb.in_conv(x)
+        x1 = bb.down1(x0)
+        f2 = bb.down2(x1)
+        self._last_f2_base = f2
+        f2_star, aux = self.bottleneck.full_context_forward(f2)
+        self._last_f2_star = f2_star
+        f3 = bb.down3(f2_star)  # P0-1: deep path uses predictive F2*
+        self._last_f3 = f3
+        feats = [x0, x1, f2_star, f3]
+        if len(bb.ft_chns) == 5:
+            f4 = bb.down4(f3)
+            feats.append(f4)
         self.last_aux = aux
         if self.training:
-            self._last_pred_loss = self.bottleneck.masked_pred_loss(feats[s].detach())
+            # P0-2: aux branch from ORIGINAL f2, encoder gets pred grad
+            self._last_pred_loss = self.bottleneck.masked_pred_loss(f2)
         else:
             self._last_pred_loss = None
-        return self.backbone.decode(feats)
+        return bb.decode(feats)
 
     @property
     def pred_loss(self) -> torch.Tensor:

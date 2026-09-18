@@ -1,36 +1,48 @@
-# V1.1 correction — not for launch until user verifies on GitHub
+# V1.2 correction (after user review of 4b7971f)
 
-## Bug fixed
+Status: **Needs revision → fixed; not launched.** Awaiting GitHub verify.
 
-`model.eval()` previously did **not** disable stochastic masking because
-`PredictiveUNet.forward(..., train_mode=True)` was a Python default, and
-`whole_volume_eval` calls `model(patch)` without that kwarg.
+## P0-1 (fixed): deep path
 
-**Effect:** val/test on P1/P2/P3 used random 40% token masks per patch
-(stochastic inference + noisy checkpoint selection).
+`backbone.encode()` had already computed `F3=E3(F2_old)` before bottleneck.
 
-## New semantics (V1.1)
+**Now:** stage-by-stage encode; `F3 = down3(F2*)` so predictive output is on
+the deep encoder path, not only a decoder skip.
 
-| Path | Behavior |
-|---|---|
-| Seg forward train | full-context `P(Z, 1)` → merge(Z, Ẑ, R) |
-| Seg forward eval | **same** full-context (deterministic under `model.eval()`) |
-| Pred loss | separate aux branch, **masked tokens only** |
-| Token grid | pooled to **~384** tokens (default 8×8×6) before attention |
+Test: `test_deep_path_f3_sees_f2_star` — zeroing merge must change F3.
 
-## Arms (ready, not launched)
+## P0-2 (fixed): aux gradients + target
 
-- **R1** `train_predictive_v11.py --arm R1` λp=0
-- **R2** `--arm R2` λp=0.3 masked-only
-- G0/G1/G2 stubbed in `ujepa/global_local_predictive.py` (not implemented)
+Old: `masked_pred_loss(feats[s].detach())` on post-bottleneck `F2*`
+→ `∇θ_E L_P = 0`, self-referential target.
 
-## Historical P* numbers
+**Now:**
+- Aux branch runs on **original F2**
+- Context tokens **not** detached → encoder + proj get grad
+- Target = `sg(Z)`
+- `L_P` only on masked tokens
 
-`test_P*_window.json` from the stochastic-mask era are **not** valid for
-R1/R2 comparison. Keep them as a labeled development artifact only.
+Test: `test_aux_grad_reaches_encoder_proj_predictor`
+(down2 / proj / predictor all have grad after `L_P.backward()`).
 
-## Next after user OK
+## Other
 
-1. Launch R1/R2 on 40901 single GPU + school
-2. If R2 ≈ A0DA (+0.001–0.002) → close local same-crop prediction
-3. Implement G0/G1/G2 Global→Local
+- `target_grid_384((32,32,24)) == (8,8,6)` explicit + unit-tested
+- Deterministic eval test passes
+- Masked fraction ~0.4 test passes
+- R1/R2 trainer `scripts/train_predictive_v11.py` unchanged API
+  (`model.pred_loss`); G0–G2 still stubbed
+- Historical P* JSONs remain **dev artifacts** (stochastic-mask era)
+
+## Locked graph
+
+```
+X → E0 → E1 → F2
+      ├─ B_full → F2* → E3 → F3* → Decoder(F0,F1,F2*,F3*)
+      └─ B_mask(F2) → L_P   (context grad, target sg)
+```
+
+## After user OK
+
+Launch R1 (λp=0) / R2 (λp=0.3) only — 40901 single GPU + school.
+No V3 implementation until R1/R2 complete under this graph.
