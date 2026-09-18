@@ -1,0 +1,25 @@
+cases=100 root=/data/hyc/PLS4MIS/code/datasets/WORD
+processed 1/100
+processed 20/100
+processed 40/100
+processed 60/100
+processed 80/100
+processed 100/100
+WROTE /data/hyc/U-JEPANet/runs/word_organ_hu_stats.json
+organ            mean_HU   edge_HU    int_HU      e-i        n_vox
+Liver             151.50    123.98    154.80   -30.81     52633179
+Spleen            162.09    121.95    169.09   -47.15      9240451
+Kidney(L)         162.52    124.03    169.73   -45.70      6659648
+Kidney(R)         162.88    126.92    169.65   -42.73      6374611
+Stomach           100.98    106.22    100.04     6.18     17610206
+Gallbladder       115.76    113.94    116.81    -2.86       608821
+Esophagus         109.00    115.81    104.50    11.31       606675
+Pancreas          145.94    129.89    153.70   -23.82      3551907
+Duodenum          122.69    118.11    124.83    -6.72      3135355
+Colon              69.20     76.29     67.26     9.03     31077820
+Intestine         108.54     90.87    114.03   -23.16     41103266
+Adrenal           114.66    103.96    129.52   -25.57       429116
+Rectum            103.40    101.37    104.09    -2.72      2579990
+Bladder           105.73    103.74    106.08    -2.33      9962493
+Femur(L)          208.09    200.78    209.58    -8.79      5936930
+Femur(R)          208.44    200.30    210.09    -9.79      6027587
