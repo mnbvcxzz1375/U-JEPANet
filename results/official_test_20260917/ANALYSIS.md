@@ -94,6 +94,12 @@ C4P − C3R:   +0.002 (s42; paired weak/strong now slightly above C3R)
 
 ## Predictive V1 first results (window, 2026-09-18 night)
 
+> **V1.1 code audit:** P1/P2/P3 val/test used **stochastic masked inference**
+> (`train_mode` defaulted True; `model.eval()` did not force full-context).
+> Checkpoint selection was noisy. Treat all P* rows as **dev artifacts**.
+> Corrected R1/R2: full-context seg path + masked-only aux loss + ~384 tokens.
+> See `V1_1_CORRECTION.md`. **Not launched** pending user GitHub verification.
+
 | Arm | 机 | val (window) | **test window ALL** | vs A0DA s42 (0.8209) |
 |---|---|---:|---:|---:|
 | A0DA s42 | school | 0.8183 | 0.8209 | — |
