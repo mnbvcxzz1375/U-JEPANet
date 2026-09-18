@@ -1,0 +1,29 @@
+cases=200 root=/tmp/amos22_385351/amos22 ct_only=True
+processed 1/200
+processed 20/200
+processed 40/200
+processed 60/200
+processed 80/200
+processed 100/200
+processed 120/200
+processed 140/200
+processed 160/200
+processed 180/200
+processed 200/200
+WROTE /public/home/heyecheng/U-JEPANet/runs/school/amos_hu_385351/amos22_organ_hu_stats.json
+organ              mean_HU   edge_HU    int_HU      e-i        n_vox n_case
+Spleen               73.32     46.05     79.76   -33.71     22573422    198
+Kidney(R)            77.86     52.87     84.71   -31.83     17002272    200
+Kidney(L)            73.61     48.59     80.35   -31.76     17596993    199
+Gallbladder          25.77     24.00     26.75    -2.76      3337777    189
+Esophagus            -6.05     25.72    -29.66    55.38      1758632    199
+Liver                68.20     47.92     71.31   -23.40    152351977    200
+Stomach            -103.20      4.96   -130.11   135.07     39714480    198
+Aorta               157.71     95.17    173.83   -78.65     13229591    200
+Postcava             68.46     52.94     73.33   -20.39      7822086    200
+Pancreas             59.87     47.65     67.69   -20.05      8254228    200
+Adrenal(R)           31.50     20.85     56.14   -35.29       388611    199
+Adrenal(L)           32.50     20.59     57.41   -36.82       459959    200
+Duodenum             -0.96     20.99    -13.67    34.67      6557920    200
+Bladder              18.58     22.62     17.10     5.51     14473529    195
+Prostate/Uterus      49.73     41.71     52.85   -11.14      6062124    192
