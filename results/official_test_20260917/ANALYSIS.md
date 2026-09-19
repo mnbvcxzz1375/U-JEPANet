@@ -147,7 +147,32 @@ Checkpoints trained on school; **test re-run on 40901** (ckpts pulled locally; q
 - low/high-CNR：test 上 G0 在 high-CNR 更稳；G1 未在 low-CNR 上拉开。
 - **结论：** 不自动开 G2；先查 val 选择是否过拟合 / shuffled-global / 是否把 GLP val 与旧 R1 val 混比。Causal 匹配本身工作正常（val 方向与 test 相反是科学结果，不是配对 bug）。
 
-## R1 under GLP trainer + gate diagnostics (2026-09-19)
+## Research story revision (after R1_GLP / 948ed7f review)
+
+**Do not write:** A0DA → R1 **+0.0056 stable** → V3.
+
+**Write instead:**
+
+> Strong pipeline (dyn+fg+HU window+CT-med) → local contextual bottleneck showed **trajectory-sensitive** gains under one DataLoader RNG protocol; independent RNG (GLP trainer) did **not** reproduce +0.005 on val; naive global fusion (V3.1) failed to establish patient-specific benefit; diagnosis: **α-gate starvation + non-identifiable fusion (Z_L residual) + voxel-normalized FOV**.
+
+- R1_GLP test ≈ 0.818/0.820 vs hist. R1_V1.2 0.826/0.827 — protocol-sensitive.
+- G1 val ≈ R1_GLP; G0 val < R1 → G1−G0 val lift is mostly “G1 doesn’t hurt like G0”, not global benefit.
+- G1−G0 test: s42 −0.0008 (15/30), s43 −0.0067 (9/30) — no patient-global evidence on test.
+
+## V3.2 Aligned Global Innovation (implemented, not launched)
+
+| | |
+|---|---|
+| Fusion | **I = Ẑ_G − Ẑ_A** only; RMS-norm Δ; α0≈0.04 (~3–5% RMS) |
+| Geometry | **GridSample** hard align at p_i (patient voxel frame; FOV audit warns vs raw DICOM origin) |
+| Arms | **B0 A0DA_GLP** · **H0 PE-only** · **H1 patient-global** (same stack/init) |
+| Gate | **H1−H0** val ≳ +0.003 both seeds **and** real-case shuffle drop |
+| RNG | DataLoader generator seed+10000 |
+| Closed | old G2; no L_GL until global content is shown used |
+
+Files: `ujepa/aligned_global_innovation.py`, `scripts/train_v32.py`, `tests/test_v32_innovation.py`. Auto-review: PASS + warnings (real-case shuffle still required at diag time).
+
+### R1 under GLP trainer + gate diagnostics (2026-09-19)
 
 Same DataLoader RNG / GLP val / code as G0/G1. α_g=0 (R1 has no coord stack).
 
