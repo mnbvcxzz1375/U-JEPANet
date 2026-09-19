@@ -1,21 +1,12 @@
-"""Global-to-Local Anatomy Predictive U-Net (V3 / GLP-U-Net).
+"""Global-to-Local Anatomy Predictive U-Net (V3.1 GLP) — integration-fixed.
 
-Locked graph:
-  local:  X_L → E0→E1→F2 → B_local(R1) → F2^R1
-  global: X_G → E_G → Z_G (~8^3 tokens)
-  coords: token → whole-volume voxel (affine-aware) → e(p_i)
-  pred:   Z_hat = P_G(Z_G, e(p))   # G0: atlas only; G1: + Z_G; G2: + L_GL
-  residual: R = Z_L - Z_hat
-  fusion: F2^GL = F2^R1 + α_G · A_G([Z_hat, R]);  α_G init **0**
-  deep:   F3 = E3(F2^GL)
-
-Arms:
-  R1  local bottleneck only (baseline, α_G=0, no coord/global)
-  G0  + coordinate atlas predictor (no whole CT)
-  G1  + whole-volume global state (cross-attn)
-  G2  G1 + Huber(Z_hat, sg(Z_L)) on original F2 latents
-
-Eval: imagesVal only for selection; shuffled-global diagnostic for G1/G2.
+P0 fixes after 2829c2a review:
+- batched per-sample coords (no crop_origin[0] expand)
+- CUDA-safe coordinate tensors
+- dataset affine_theta → (3,4); global_image → (1,D,H,W)
+- GLP whole-volume evaluator with real crop origins + whole CT
+- global tokens get whole-volume positional encoding
+- isolated DataLoader generator
 """
 
 from __future__ import annotations
@@ -26,14 +17,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .ct_augment import local_token_to_global_voxel, token_coord_features
+from .ct_augment import token_coord_features_batched
 from .dualpath_jepa import tokens_from_volume
 from .predictive_unet import PredictiveBottleneck, target_grid_384
 from .unet3d import UNet3D
 
 
 class GlobalStem(nn.Module):
-    """Lightweight 3D CNN → ~8^3 global tokens."""
+    """Lightweight 3D CNN → ~8^3 global tokens with whole-volume PE."""
 
     def __init__(self, embed_dim: int = 256, grid: Tuple[int, int, int] = (8, 8, 8)):
         super().__init__()
@@ -51,40 +42,55 @@ class GlobalStem(nn.Module):
         )
         self.proj = nn.Conv3d(64, embed_dim, 1)
         self.norm = nn.LayerNorm(embed_dim)
+        self.pe_mlp = nn.Sequential(nn.Linear(3, embed_dim), nn.GELU(), nn.Linear(embed_dim, embed_dim))
+        gd, gh, gw = grid
+        zs = (torch.arange(gd, dtype=torch.float32) + 0.5) / gd
+        ys = (torch.arange(gh, dtype=torch.float32) + 0.5) / gh
+        xs = (torch.arange(gw, dtype=torch.float32) + 0.5) / gw
+        zz, yy, xx = torch.meshgrid(zs, ys, xs, indexing="ij")
+        pe = torch.stack([zz, yy, xx], dim=-1).reshape(-1, 3)  # (N,3) zyx in [0,1]
+        self.register_buffer("pe_grid", pe, persistent=False)
 
     def forward(self, x_g: torch.Tensor) -> torch.Tensor:
-        # x_g: (B,1,D,H,W) already windowed
+        # x_g: (B,1,D,H,W)
+        if x_g.dim() == 4:
+            x_g = x_g.unsqueeze(1)
         h = self.stem(x_g)
         h = F.adaptive_avg_pool3d(h, self.grid)
         h = self.proj(h)
-        tok = tokens_from_volume(h)
-        return self.norm(tok)
+        tok = tokens_from_volume(h)  # (B,N,C)
+        pe = self.pe_mlp(self.pe_grid.to(tok.device, tok.dtype))  # (N,C)
+        return self.norm(tok + pe.unsqueeze(0))
 
 
 class CoordAtlas(nn.Module):
-    """Learnable anatomical atlas: e_i = MLP(c_i), c_i=[p_i, s]."""
-
     def __init__(self, embed_dim: int = 256, hidden: int = 128):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(6, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, embed_dim),
-        )
+        self.mlp = nn.Sequential(nn.Linear(6, hidden), nn.GELU(), nn.Linear(hidden, embed_dim))
 
     def forward(self, coord_feat: torch.Tensor) -> torch.Tensor:
-        # (B, N, 6) → (B, N, C)
         return self.mlp(coord_feat)
 
 
-class GlobalToLocalPredictor(nn.Module):
-    """Z_hat_L = CrossAttn(Q=e(p), K/V=Z_G) or atlas-only MLP path."""
+class CrossAttnBlock(nn.Module):
+    def __init__(self, dim: int, heads: int):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.norm1 = nn.LayerNorm(dim)
+        self.ff = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim))
+        self.norm2 = nn.LayerNorm(dim)
 
+    def forward(self, q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+        h, _ = self.attn(self.norm1(q), kv, kv, need_weights=False)
+        q = q + h
+        q = q + self.ff(self.norm2(q))
+        return q
+
+
+class GlobalToLocalPredictor(nn.Module):
     def __init__(self, embed_dim: int = 256, num_heads: int = 4, n_blocks: int = 2):
         super().__init__()
-        self.blocks = nn.ModuleList(
-            [CrossAttnBlock(embed_dim, num_heads) for _ in range(n_blocks)]
-        )
+        self.blocks = nn.ModuleList([CrossAttnBlock(embed_dim, num_heads) for _ in range(n_blocks)])
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, q: torch.Tensor, z_g: Optional[torch.Tensor]) -> torch.Tensor:
@@ -96,29 +102,10 @@ class GlobalToLocalPredictor(nn.Module):
         return self.norm(x)
 
 
-class CrossAttnBlock(nn.Module):
-    def __init__(self, dim: int, heads: int):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(dim)
-        self.ff = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Linear(dim * 4, dim),
-        )
-        self.norm2 = nn.LayerNorm(dim)
-
-    def forward(self, q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
-        h, _ = self.attn(self.norm1(q), kv, kv, need_weights=False)
-        q = q + h
-        q = q + self.ff(self.norm2(q))
-        return q
-
-
 class GLPUNet(nn.Module):
     def __init__(
         self,
-        arm: str = "R1",  # R1 | G0 | G1 | G2
+        arm: str = "R1",
         feature_chns: Sequence[int] = (16, 32, 64, 128),
         class_num: int = 17,
         embed_dim: int = 256,
@@ -164,42 +151,23 @@ class GLPUNet(nn.Module):
         self.gl_pred = GlobalToLocalPredictor(embed_dim, num_heads, n_blocks=2) if self.use_coord else None
         merge_in = embed_dim * 2 if self.use_coord else 0
         self.gl_merge = nn.Conv3d(merge_in, ch, kernel_size=1) if self.use_coord else None
-        # α_G init 0 → G* starts identical to R1
         self.alpha_g = nn.Parameter(torch.zeros(())) if self.use_coord else None
-        # local token projection for Z_L / GL loss (from original F2)
         self.local_tok_proj = nn.Conv3d(ch, embed_dim, 1) if self.use_coord else None
         self.local_tok_norm = nn.LayerNorm(embed_dim) if self.use_coord else None
 
         self.last_aux: Dict[str, torch.Tensor] = {}
         self._last_gl_loss: Optional[torch.Tensor] = None
         self.last_coord_feat: Optional[torch.Tensor] = None
-        self.last_zhat: Optional[torch.Tensor] = None
-        self.last_z_l: Optional[torch.Tensor] = None
-        self.last_global_shuffled: bool = False
+        self.last_global_shuffled = False
 
-    def _local_tokens(self, f2: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int, int], Tuple[int, int, int]]:
+    def _local_tokens(self, f2: torch.Tensor):
         b, c, d, h, w = f2.shape
         grid = target_grid_384((d, h, w))
         vol = self.local_tok_proj(f2)
-        vol = F.adaptive_avg_pool3d(vol, grid) if tuple(vol.shape[-3:]) != tuple(grid) else vol
+        if tuple(vol.shape[-3:]) != tuple(grid):
+            vol = F.adaptive_avg_pool3d(vol, grid)
         tok = self.local_tok_norm(tokens_from_volume(vol))
         return tok, grid, (d, h, w)
-
-    def _coord_q(
-        self,
-        grid: Tuple[int, int, int],
-        crop_origin,
-        full_shape,
-        patch_size,
-        theta,
-        batch: int,
-        device,
-    ) -> torch.Tensor:
-        gvox = local_token_to_global_voxel(grid, crop_origin, full_shape, patch_size, theta)
-        cfeat = token_coord_features(gvox, full_shape, patch_size)  # (gd,gh,gw,6)
-        cfeat = cfeat.reshape(1, -1, 6).expand(batch, -1, -1).to(device)
-        self.last_coord_feat = cfeat
-        return self.coord_atlas(cfeat)
 
     def forward(
         self,
@@ -210,6 +178,7 @@ class GLPUNet(nn.Module):
         affine_theta: Optional[torch.Tensor] = None,
         patch_size: Tuple[int, int, int] = (128, 128, 96),
         shuffle_global: bool = False,
+        shuffle_global_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         bb = self.backbone
         x0 = bb.in_conv(x)
@@ -224,26 +193,35 @@ class GLPUNet(nn.Module):
         if self.use_coord:
             b = f2.shape[0]
             device = f2.device
-            z_l, grid, spatial = self._local_tokens(f2)  # original F2 tokens
-            self.last_z_l = z_l
+            z_l, grid, spatial = self._local_tokens(f2)
             if crop_origin is None:
-                crop_origin = torch.zeros(b, 3, dtype=torch.long)
+                crop_origin = torch.zeros(b, 3, dtype=torch.long, device=device)
             if full_shape is None:
-                full_shape = torch.tensor([[*patch_size]] * b)
-            co = crop_origin[0].tolist() if crop_origin.dim() > 1 else crop_origin.tolist()
-            fs = full_shape[0].tolist() if full_shape.dim() > 1 else full_shape.tolist()
-            th = affine_theta[0] if affine_theta is not None and affine_theta.dim() == 3 else affine_theta
-            q = self._coord_q(grid, co, fs, tuple(patch_size), th, b, device)
+                full_shape = torch.tensor([[*patch_size]] * b, dtype=torch.long, device=device)
+            if affine_theta is None:
+                affine_theta = torch.eye(3, 4, device=device).unsqueeze(0).expand(b, -1, -1)
+            # P0: batched coords, CUDA-safe
+            cfeat = token_coord_features_batched(
+                token_grid_zyx=grid,
+                crop_origin=crop_origin,
+                full_shape=full_shape,
+                patch_size=tuple(patch_size),
+                theta=affine_theta,
+                device=device,
+            )  # (B,N,6)
+            self.last_coord_feat = cfeat
+            q = self.coord_atlas(cfeat)
 
             z_g = None
             if self.use_global and global_image is not None:
                 z_g = self.global_stem(global_image)
-                if shuffle_global and b > 1:
-                    z_g = torch.roll(z_g, shifts=1, dims=0)
-                elif shuffle_global:
-                    z_g = torch.roll(z_g, shifts=1, dims=0)
+                if shuffle_global:
+                    if shuffle_global_ids is not None:
+                        z_g = z_g[shuffle_global_ids]
+                    elif b > 1:
+                        z_g = torch.roll(z_g, shifts=1, dims=0)
+                    # b==1 without ids: cannot shuffle — caller must pass other-case Z_G
             zhat = self.gl_pred(q, z_g)
-            self.last_zhat = zhat
             r_gl = z_l - zhat
             d, h, w = spatial
             gd, gh, gw = grid
@@ -255,7 +233,6 @@ class GLPUNet(nn.Module):
             f2_star = f2_r1 + self.alpha_g * delta
 
             if self.training and self.use_gl_loss:
-                # Huber(Z_hat, sg(Z_L)) — Z_L from original F2 (not F2*)
                 self._last_gl_loss = F.smooth_l1_loss(zhat, z_l.detach(), reduction="none").mean(-1).mean()
 
         f3 = bb.down3(f2_star)

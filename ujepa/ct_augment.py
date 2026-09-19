@@ -239,6 +239,65 @@ def token_coord_features(
     return torch.cat([p, s], dim=-1)
 
 
+def token_coord_features_batched(
+    token_grid_zyx: Tuple[int, int, int],
+    crop_origin: torch.Tensor,
+    full_shape: torch.Tensor,
+    patch_size: Sequence[int],
+    theta: Optional[torch.Tensor] = None,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Batched (B,N,6) coord features on `device`. P0: no first-sample expand.
+
+    crop_origin: (B,3) long/float zyx
+    full_shape: (B,3) long
+    theta: (B,3,4) or None
+    """
+    gd, gh, gw = [int(v) for v in token_grid_zyx]
+    pd, ph, pw = [int(v) for v in patch_size]
+    if device is None:
+        device = crop_origin.device
+    B = crop_origin.shape[0]
+    zs = (torch.arange(gd, device=device, dtype=torch.float32) + 0.5) * (pd / gd)
+    ys = (torch.arange(gh, device=device, dtype=torch.float32) + 0.5) * (ph / gh)
+    xs = (torch.arange(gw, device=device, dtype=torch.float32) + 0.5) * (pw / gw)
+    zz, yy, xx = torch.meshgrid(zs, ys, xs, indexing="ij")
+    local = torch.stack([zz, yy, xx], dim=-1).reshape(1, -1, 3)  # (1,N,3) zyx edge centers
+    local = local.expand(B, -1, -1)
+
+    # affine: u = 2c/S - 1, xyz order for affine_grid
+    u_z = local[..., 0] / pd * 2 - 1
+    u_y = local[..., 1] / ph * 2 - 1
+    u_x = local[..., 2] / pw * 2 - 1
+    xyz_out = torch.stack([u_x, u_y, u_z], dim=-1)  # (B,N,3)
+
+    if theta is None:
+        local_orig = local
+    else:
+        th = theta.to(device=device, dtype=torch.float32)
+        if th.dim() == 2:
+            th = th.unsqueeze(0)
+        if th.dim() == 4:
+            th = th[:, 0]
+        R = th[:, :3, :3]  # (B,3,3)
+        t = th[:, :3, 3]  # (B,3)
+        # xyz_in[b,n,:] = R[b] @ xyz_out[b,n] + t[b]
+        xyz_in = torch.einsum("bij,bnj->bni", R, xyz_out) + t.unsqueeze(1)
+        z_in = (xyz_in[..., 2] + 1) * 0.5 * pd
+        y_in = (xyz_in[..., 1] + 1) * 0.5 * ph
+        x_in = (xyz_in[..., 0] + 1) * 0.5 * pw
+        local_orig = torch.stack([z_in, y_in, x_in], dim=-1)
+
+    origin = crop_origin.to(device=device, dtype=torch.float32).unsqueeze(1)  # (B,1,3)
+    gvox = local_orig + origin  # (B,N,3)
+
+    fs = full_shape.to(device=device, dtype=torch.float32)  # (B,3)
+    p = gvox / fs.unsqueeze(1).clamp(min=1.0)
+    s = torch.tensor([pd, ph, pw], device=device, dtype=torch.float32) / fs.clamp(min=1.0)
+    s = s.unsqueeze(1).expand(B, gvox.shape[1], 3)
+    return torch.cat([p, s], dim=-1)
+
+
 def seg_augment_hu(
     x_hu: torch.Tensor,
     strength: float = 1.0,

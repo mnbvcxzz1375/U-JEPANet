@@ -16,8 +16,8 @@ sys.path.insert(0, str(ROOT))
 from train import _read_id_list
 from ujepa.dynamic_dataset import DynamicWordVolumeDataset
 from ujepa.global_local_predictive import GLPUNet
+from ujepa.glp_eval import evaluate_word_whole_volume_glp
 from ujepa.losses import deep_supervision_loss, dice_ce_loss
-from ujepa.whole_volume_eval import evaluate_word_whole_volume
 
 
 def collate(b):
@@ -79,7 +79,11 @@ def main():
         return_global=need_global,
         global_size=(64, 64, 64),
     )
-    loader = torch.utils.data.DataLoader(ds, batch_size=args.batch, shuffle=True, collate_fn=collate)
+    loader = torch.utils.data.DataLoader(
+        ds, batch_size=args.batch, shuffle=True, collate_fn=collate,
+        # P1: isolate shuffle RNG from model-init RNG
+        generator=torch.Generator().manual_seed(args.seed + 10000),
+    )
 
     model = GLPUNet(
         arm=arm,
@@ -128,10 +132,12 @@ def main():
             )
         if step % args.val_every == 0 or step == args.steps:
             model.eval()
-            # imagesVal selection only — never official test for arch choice
-            vm = evaluate_word_whole_volume(
+            # P0: GLP-aware val (real origins + whole-CT global when needed)
+            vm = evaluate_word_whole_volume_glp(
                 model, args.word_root, val_ids, 17, (128, 128, 96), (64, 64, 48), device,
                 intensity_mode=args.intensity_mode,
+                need_global=need_global,
+                global_size=(64, 64, 64),
             )
             md = vm["mean_fg_dice"]
             history.append({"step": step, "mean_fg_dice": md, "alpha_g": model.alpha_g_value})

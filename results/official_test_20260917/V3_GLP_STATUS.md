@@ -1,47 +1,37 @@
-# V3 GLP-U-Net — implement, not launched
+# V3.1 GLP — integration P0s fixed; not launched
 
-User authorized V3 after V1.2 gates (4f60193 + review). **Training not started.**
+After user review of `2829c2a` (Needs revision). This commit fixes Dataset→collate→CUDA→val boundaries.
 
-## Locked story
+## P0 fixes
 
-- V1.2 shows **deep contextual bottleneck** positive signal (R1−A0DA ≈ +0.0056 both seeds);
-  **not** “predictive learning works” (R2−R1 ≈ 0).
-- R1 is the **new architecture baseline**.
-- Primary next gate: **G1 − G0** (patient-specific whole-CT vs coordinate atlas).
+| Issue | Fix |
+|---|---|
+| batch coords used `origin[0]` | `token_coord_features_batched` → `(B,N,6)` per-sample |
+| `affine_theta` `(B,1,3,4)` | Dataset stores `(3,4)`; collate → `(B,3,4)` |
+| `global_image` `(B,64,64,64)` | Dataset stores `(1,64,64,64)`; collate → `(B,1,64,64,64)` |
+| CPU/CUDA coord mismatch | batched helper uses `crop_origin.device` |
+| val ignored coords/global | **`ujepa/glp_eval.py`**: real patch origins + whole-CT global; θ=I |
 
-## Arms
+## P1 (done)
 
-| Arm | Local R1 bottleneck | Coord atlas | Whole CT Z_G | L_GL |
-|---|---|---|---|---|
-| R1 | ✓ | × | × | × |
-| G0 | ✓ | ✓ | × | × |
-| G1 | ✓ | ✓ | ✓ | × |
-| G2 | ✓ | ✓ | ✓ | ✓ Huber(Z_hat, sg(Z_L_orig)) |
+- Global tokens + whole-volume PE (`GlobalStem.pe_mlp`)
+- DataLoader `generator=seed+10000` isolated from model-init RNG
+- shuffle_global: batch=1 roll is no-op — external case ids required for diagnostic (documented in tests)
 
-- `α_G` init **0** → G* starts ≡ R1
-- G2 target from **original F2** tokens, not post-fusion
-- Selection **imagesVal only** (test is development-only after many peeks)
-- Mechanism metric (pre-reg): ΔDice_lowCNR vs highCNR
-- Diagnostic: shuffled-global on G1/G2
+## α_G=0 gradient contract (intentional)
 
-## P0 contract (must pass before train)
+- G0/G1 step-0: fusion path zeros → only `alpha_g` gets grad; atlas/global enter after α leaves 0
+- G2: `L_GL` trains global stem + atlas even when α=0
 
-`tests/test_glp_v3_alignment.py` — **ALL_GLP_V3_TESTS_PASS** on 40901:
+## Tests (40901)
 
-- identity crop origin math
-- **affine θ round-trip** vs align_corners=False (edge-based coords, no double +0.5)
-- α_G=0 freezes fusion
-- G2 L_GL grads into global stem
-- dataset returns crop_origin / full_shape / affine_theta / global_image
+```
+ALL_GLP_V3_TESTS_PASS
+ALL_GLP_INTEGRATION_TESTS_PASS
+```
 
-## Files
+Includes: batch coords differ, CUDA batch=2 G0/G1/G2 fwd+bwd, GLP evaluator origins ≠ 0.
 
-- `ujepa/ct_augment.py` — mild_affine `return_theta`, token→global voxel helpers
-- `ujepa/dynamic_dataset.py` — crop meta + global view
-- `ujepa/global_local_predictive.py` — GLPUNet
-- `scripts/train_glp_v3.py` — G0/G1/G2 (+R1)
-- `tests/test_glp_v3_alignment.py`
+## Launch (after user OK)
 
-## After user verify → launch
-
-40901 one GPU + 40902 + school A800/4090d; seeds 42/43; no SIGReg/sparse/particle yet.
+G0/G1 s42+s43 parallel; imagesVal selection only; primary gate **G1−G0**.

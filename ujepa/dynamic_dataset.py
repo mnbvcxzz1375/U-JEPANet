@@ -209,13 +209,18 @@ class DynamicWordVolumeDataset(Dataset):
         if self.return_crop_meta:
             out["crop_origin"] = torch.tensor([z0, y0, x0], dtype=torch.long)
             out["full_shape"] = torch.tensor(list(full_shape), dtype=torch.long)
-            out["affine_theta"] = affine_theta.float()
+            # P0: store (3,4) so collate → (B,3,4)
+            th = affine_theta
+            if th.dim() == 3:
+                th = th[0]
+            out["affine_theta"] = th.detach().float().contiguous()
         if self.return_global:
             g = canonical_window(torch.from_numpy(img).float())
             g = torch.nn.functional.interpolate(
                 g[None, None], size=self.global_size, mode="trilinear", align_corners=False
-            )[0, 0]
-            out["global_image"] = g
+            )
+            # P0: keep channel dim (1,D,H,W); collate → (B,1,D,H,W)
+            out["global_image"] = g[0].contiguous()
         return out
 
 
