@@ -48,6 +48,9 @@ class DynamicWordVolumeDataset(Dataset):
         strength: float = 1.0,
         cache_dir: Optional[str | Path] = None,
         preload: bool = False,
+        return_crop_meta: bool = False,
+        return_global: bool = False,
+        global_size: Sequence[int] = (64, 64, 64),
     ):
         self.root = Path(word_root)
         self.ids = list(case_ids)
@@ -61,6 +64,9 @@ class DynamicWordVolumeDataset(Dataset):
         self.strength = strength
         self._g = torch.Generator().manual_seed(seed)
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.return_crop_meta = bool(return_crop_meta)
+        self.return_global = bool(return_global)
+        self.global_size = tuple(int(v) for v in global_size)
 
         # Lazy volume store: do not preload all CTs into RAM.
         self._img_cache: Dict[str, np.ndarray] = {}
@@ -162,7 +168,9 @@ class DynamicWordVolumeDataset(Dataset):
         z0, y0, x0 = self._sample_origin(img, lab)
         crop_hu = self._crop(img, z0, y0, x0)
         x_hu = torch.from_numpy(np.ascontiguousarray(crop_hu)).float().unsqueeze(0)  # (1,D,H,W)
+        full_shape = tuple(int(v) for v in img.shape)
 
+        affine_theta = torch.eye(3, 4)
         if self.mode == "jepa_target":
             x = jepa_weak_target(x_hu)
         elif self.mode == "jepa_context":
@@ -178,12 +186,12 @@ class DynamicWordVolumeDataset(Dataset):
         else:
             label = torch.from_numpy(np.ascontiguousarray(self._crop(lab, z0, y0, x0))).long()
             is_l = True
-            # shared mild affine for seg only
             if self.mode == "seg" and self.strength > 0:
-                # x is (1,D,H,W); mild_affine expects (B,C,D,H,W)
-                lab_t = label.unsqueeze(0).unsqueeze(0).float()  # (1,1,D,H,W)
-                x5 = x.unsqueeze(0)  # (1,1,D,H,W)
-                x5, lab_t = mild_affine(x5, lab_t, p=0.5)
+                lab_t = label.unsqueeze(0).unsqueeze(0).float()
+                x5 = x.unsqueeze(0)
+                x5, lab_t, affine_theta = mild_affine(
+                    x5, lab_t, p=0.5, return_theta=True, generator=self._g
+                )
                 if lab_t.dim() == 5:
                     label = lab_t[0, 0].long()
                 elif lab_t.dim() == 4:
@@ -192,12 +200,23 @@ class DynamicWordVolumeDataset(Dataset):
                     label = lab_t.long()
                 x = x5[0] if x5.dim() == 5 else x5
 
-        return {
+        out: Dict[str, torch.Tensor | str | bool] = {
             "image": x,
             "label": label,
             "is_labeled": torch.tensor(is_l, dtype=torch.bool),
             "case_id": cid,
         }
+        if self.return_crop_meta:
+            out["crop_origin"] = torch.tensor([z0, y0, x0], dtype=torch.long)
+            out["full_shape"] = torch.tensor(list(full_shape), dtype=torch.long)
+            out["affine_theta"] = affine_theta.float()
+        if self.return_global:
+            g = canonical_window(torch.from_numpy(img).float())
+            g = torch.nn.functional.interpolate(
+                g[None, None], size=self.global_size, mode="trilinear", align_corners=False
+            )[0, 0]
+            out["global_image"] = g
+        return out
 
 
 def build_dynamic_loaders(

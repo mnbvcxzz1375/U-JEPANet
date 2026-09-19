@@ -110,16 +110,18 @@ Graph: full-context seg `F3=E3(F2*)`; aux L_P on original F2 (context live, targ
 | Gate | s42 | s43 | mean | 读法 |
 |---|---:|---:|---:|---|
 | **R2 − R1** (pred loss) | +0.0011 | −0.0005 | **+0.0003** | \|Δ\|<0.002 且方向不一致 → **关闭 local same-crop predictive objective** |
-| **R1 − A0DA** (architecture) | **+0.0053** | **+0.0058** | **+0.0056** | 两 seed 同向 → predictive **bottleneck 进 deep path** 有稳定正贡献 |
-| R2 − A0DA | +0.0064 | +0.0053 | +0.0059 | 与 R1 相近，增益主要来自架构而非 L_P |
+| **R1 − A0DA** (contextual bottleneck) | **+0.0053** | **+0.0058** | **+0.0056** | 两 seed 同向；患者级 CI 分别约 [−0.001,+0.012] / [+0.002,+0.010] → **强正信号，非充分统计证明** |
+| R2 − A0DA | +0.0064 | +0.0053 | +0.0059 | 与 R1 相近 → 增益主要来自 **low-res contextual mixing / bottleneck**，不是 pred loss |
+
+**措辞（重要）：** V1.2 证明的是 **deep contextual bottleneck 有正信号**，不是 “predictive learning 已经有效”。R1 的 all-visible predictor 在 λp=0 时更接近 `Transformer(Z+PE)` 的 non-local mixing。Bladder 单器官约解释整体 mean 增量的 ~40%。
 
 `eval_det_maxdiff=0.0` on all four arms.
 
 ### 结论（预锁门）
 
 1. **Local same-crop predictive learning 正式结束**（R2≈R1）。
-2. **V1.2 架构（predictor 在 deep path）相对 A0DA 双 seed +0.005~0.006**，不是随机 mask 假象。
-3. 下一主线：**V3 G0/G1/G2 Global→Local**（信息增量），不要再调 λp / block mask 作为优先项。
+2. **Deep-path contextual bottleneck** 相对 A0DA 双 seed +0.005~0.006（架构信号；统计仍单/双 seed）。
+3. **下一主线 V3 GLP：** R1 为新 baseline → G0 coord atlas → G1 whole-CT global → G2 + GL pred loss。主门 **G1−G0**（patient-specific global vs atlas）。
 
 ### Predictive V1 first results (window, 2026-09-18 night)
 

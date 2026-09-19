@@ -14,7 +14,6 @@ def ct_window(
     width: float,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Map HU to [0,1] via window: clip((hu - (L-W/2)) / W, 0, 1)."""
     lo = level - width / 2.0
     return ((x_hu - lo) / max(width, eps)).clamp(0.0, 1.0)
 
@@ -55,8 +54,9 @@ def gaussian_blur(
     x: torch.Tensor,
     p: float = 0.1,
     sigma: float = 0.8,
+    generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
-    if torch.rand(1).item() > p:
+    if torch.rand(1, generator=generator).item() > p:
         return x
     squeeze = False
     if x.dim() == 4:
@@ -83,10 +83,11 @@ def low_resolution(
     x: torch.Tensor,
     p: float = 0.15,
     scale_range: Tuple[float, float] = (0.5, 1.0),
+    generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
-    if torch.rand(1).item() > p:
+    if torch.rand(1, generator=generator).item() > p:
         return x
-    s = scale_range[0] + torch.rand(1).item() * (scale_range[1] - scale_range[0])
+    s = scale_range[0] + torch.rand(1, generator=generator).item() * (scale_range[1] - scale_range[0])
     if s >= 0.99:
         return x
     squeeze = False
@@ -99,49 +100,66 @@ def low_resolution(
     return y.squeeze(0) if squeeze else y
 
 
+def _identity_theta(batch: int = 1, device=None, dtype=torch.float32) -> torch.Tensor:
+    th = torch.eye(3, 4, dtype=dtype, device=device)
+    return th.unsqueeze(0).expand(batch, -1, -1).contiguous()
+
+
 def mild_affine(
     x: torch.Tensor,
     y: Optional[torch.Tensor] = None,
     max_rotate_deg: float = 12.0,
     scale_range: Tuple[float, float] = (0.9, 1.1),
     p: float = 0.5,
+    return_theta: bool = False,
+    generator: Optional[torch.Generator] = None,
 ):
     """Shared affine for image (+ optional label). No LR flip.
 
-    Image: bilinear; label: nearest.
+    return_theta: also return (B,3,4) affine_grid theta (output→input norm coords).
+    Identity when no affine is applied.
     """
-    if torch.rand(1).item() > p:
-        return (x, y) if y is not None else x
+
+    def _rand() -> float:
+        if generator is None:
+            return torch.rand(1).item()
+        return torch.rand(1, generator=generator).item()
+
+    if _rand() > p:
+        b = x.shape[0] if x.dim() == 5 else 1
+        th0 = _identity_theta(b, x.device, x.dtype)
+        if y is not None:
+            return (x, y, th0) if return_theta else (x, y)
+        return (x, th0) if return_theta else x
+
     if x.dim() == 4:
         x = x.unsqueeze(0)
         squeeze = True
     else:
         squeeze = False
     b, c, d, h, w = x.shape
-    # sample angles around D/H/W axes (small)
     import math
 
     def ang():
-        return math.radians((torch.rand(1).item() * 2 - 1) * max_rotate_deg)
+        return math.radians((_rand() * 2 - 1) * max_rotate_deg)
 
     a, bb, cc = ang(), ang(), ang()
-    s = scale_range[0] + torch.rand(1).item() * (scale_range[1] - scale_range[0])
+    s = scale_range[0] + _rand() * (scale_range[1] - scale_range[0])
     ca, sa = math.cos(a), math.sin(a)
     cb, sb = math.cos(bb), math.sin(bb)
     cx, sx = math.cos(cc), math.sin(cc)
-    # R = Rz @ Ry @ Rx (simplified composition), scaled
     R = torch.tensor(
         [
             [cb * cx, -cb * sx, sb],
-            [sa * sb * cx + ca * sx, -sa * sb * sx + ca * cx, -sa * cb],
-            [-ca * sb * cx + sa * sx, ca * sb * sx + sa * cx, ca * cb],
+            [sa * sb * cx + ca * sx, -sa * sb * sx + ca * cx, -ca * cb],
+            [-ca * sb * cx + sa * sx, ca * sb * sx + ca * cb, ca * cb],
         ],
         dtype=x.dtype,
         device=x.device,
     ) * s
     theta = torch.eye(3, 4, dtype=x.dtype, device=x.device)
     theta[:3, :3] = R
-    theta = theta.unsqueeze(0).expand(b, -1, -1)
+    theta = theta.unsqueeze(0).expand(b, -1, -1).contiguous()
     grid = F.affine_grid(theta, x.size(), align_corners=False)
     x_t = F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=False)
     if y is not None:
@@ -153,7 +171,72 @@ def mild_affine(
     else:
         out_y = None
     x_out = x_t.squeeze(0) if squeeze else x_t
+    if return_theta:
+        if y is not None:
+            return x_out, out_y, theta
+        return x_out, theta
     return (x_out, out_y) if out_y is not None else x_out
+
+
+def local_token_to_global_voxel(
+    token_grid_zyx: Tuple[int, int, int],
+    crop_origin: Sequence[int],
+    full_shape: Sequence[int],
+    patch_size: Sequence[int],
+    theta: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Local token centers → whole-volume voxel (z,y,x).
+
+    If theta is None/identity: crop_origin + center offset in patch (no affine).
+    Otherwise apply affine_grid theta (output→input on patch, xyz order, align_corners=False)
+    then add crop_origin.
+    """
+    gd, gh, gw = [int(v) for v in token_grid_zyx]
+    pd, ph, pw = [int(v) for v in patch_size]
+    z0, y0, x0 = [int(v) for v in crop_origin]
+    zs = (torch.arange(gd, dtype=torch.float32) + 0.5) * (pd / gd)
+    ys = (torch.arange(gh, dtype=torch.float32) + 0.5) * (ph / gh)
+    xs = (torch.arange(gw, dtype=torch.float32) + 0.5) * (pw / gw)
+    zz, yy, xx = torch.meshgrid(zs, ys, xs, indexing="ij")
+    local_vox = torch.stack([zz, yy, xx], dim=-1)  # zyx
+
+    if theta is None:
+        return local_vox + torch.tensor([z0, y0, x0], dtype=torch.float32)
+
+    th = theta.detach().float()
+    if th.dim() == 3:
+        th = th[0]
+    # local_vox is edge-based continuous center: voxel-index i has center i+0.5.
+    # align_corners=False: u = 2*c/S - 1, c = (u+1)*0.5*S.
+    u_z = local_vox[..., 0] / pd * 2 - 1
+    u_y = local_vox[..., 1] / ph * 2 - 1
+    u_x = local_vox[..., 2] / pw * 2 - 1
+    xyz_out = torch.stack([u_x, u_y, u_z], dim=-1)
+    R = th[:3, :3]
+    t = th[:3, 3]
+    xyz_in = torch.einsum("ij,...j->...i", R, xyz_out) + t
+    z_in = (xyz_in[..., 2] + 1) * 0.5 * pd
+    y_in = (xyz_in[..., 1] + 1) * 0.5 * ph
+    x_in = (xyz_in[..., 0] + 1) * 0.5 * pw
+    local_orig = torch.stack([z_in, y_in, x_in], dim=-1)
+    return local_orig + torch.tensor([z0, y0, x0], dtype=torch.float32)
+
+
+def token_coord_features(
+    global_vox_zyx: torch.Tensor,
+    full_shape: Sequence[int],
+    patch_size: Sequence[int],
+) -> torch.Tensor:
+    """c_i = [p_i, s] with p in [0,1]^3 (z,y,x), s=patch/full."""
+    D, H, W = [float(v) for v in full_shape]
+    pd, ph, pw = [float(v) for v in patch_size]
+    p = global_vox_zyx.clone()
+    p[..., 0] = p[..., 0] / max(D, 1)
+    p[..., 1] = p[..., 1] / max(H, 1)
+    p[..., 2] = p[..., 2] / max(W, 1)
+    s = torch.tensor([pd / max(D, 1), ph / max(H, 1), pw / max(W, 1)], dtype=p.dtype)
+    s = s.view(*([1] * (p.dim() - 1)), 3).expand_as(p)
+    return torch.cat([p, s], dim=-1)
 
 
 def seg_augment_hu(
@@ -161,7 +244,6 @@ def seg_augment_hu(
     strength: float = 1.0,
     generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
-    """Full-volume or patch in HU → windowed [0,1] + mild intensity noise."""
     x = random_window(
         x_hu,
         d_level=30.0 * strength,
@@ -169,9 +251,9 @@ def seg_augment_hu(
         generator=generator,
     )
     x = gaussian_noise(x, p=0.15 * strength, std=0.03 * strength, generator=generator)
-    x = gaussian_blur(x, p=0.1 * strength, sigma=0.8)
+    x = gaussian_blur(x, p=0.1 * strength, sigma=0.8, generator=generator)
     if strength > 0.5:
-        x = low_resolution(x, p=0.15 * strength)
+        x = low_resolution(x, p=0.15 * strength, generator=generator)
     return x
 
 
@@ -182,5 +264,5 @@ def jepa_weak_target(x_hu: torch.Tensor) -> torch.Tensor:
 def jepa_strong_context(x_hu: torch.Tensor, generator: Optional[torch.Generator] = None) -> torch.Tensor:
     x = random_window(x_hu, generator=generator)
     x = gaussian_noise(x, p=0.25, std=0.04, generator=generator)
-    x = gaussian_blur(x, p=0.2, sigma=1.0)
+    x = gaussian_blur(x, p=0.2, sigma=1.0, generator=generator)
     return x
