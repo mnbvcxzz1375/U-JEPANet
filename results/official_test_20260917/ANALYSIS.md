@@ -123,6 +123,28 @@ Graph: full-context seg `F3=E3(F2*)`; aux L_P on original F2 (context live, targ
 2. **Deep-path contextual bottleneck** 相对 A0DA 双 seed +0.005~0.006（架构信号；统计仍单/双 seed）。
 3. **下一主线 V3 GLP：** R1 为新 baseline → G0 coord atlas → G1 whole-CT global → G2 + GL pred loss。主门 **G1−G0**（patient-specific global vs atlas）。
 
+## V3.1 GLP G0/G1 — val + official test (window / GLP-aware)
+
+Causal control: same stack; G0 `Z_G=PE`, G1 `Z_G=E_G(X_G)+PE`. Selection = imagesVal.
+
+| Arm | seed | val best | **test ALL** | low-CNR | high-CNR | α_G |
+|---|---|---:|---:|---:|---:|---:|
+| G0 | 42 | 0.8103 | **0.8222** | 0.7312 | **0.9332** | −0.047 |
+| G1 | 42 | **0.8174** | 0.8213 | **0.7338** | 0.9266 | −0.001 |
+| G0 | 43 | 0.8074 | *(pending)* | | | −0.001 |
+| G1 | 43 | **0.8131** | *(pending)* | | | +0.0005 |
+
+### Gates
+
+| Gate | val s42 | val s43 | test s42 | 读法 |
+|---|---:|---:|---:|---|
+| **G1−G0** | **+0.0071** | **+0.0057** | **−0.0009** | val 双 seed 同向 ≳0.005；**test s42 反向** → 等 s43 再判 |
+| low-CNR − high (G1−G0) test | — | — | low +0.003 / high −0.007 | G1 更抬 low-CNR、略伤 high-CNR（机制方向部分支持） |
+| α_G (G1) | ~0 | ~0 | ~0 | global residual 几乎未被放大 → 未证明强依赖 Z_G |
+| G1 vs R1 val | 0.817 vs 0.819 | 0.813 vs 0.822 | — | G1 未超过 R1 val；勿把 G1−G0 说成 >R1 |
+
+**暂不自动开 G2**：val 有正信号，但 test s42 与 α_G≈0 使「patient global 被利用」尚未闭合。待 s43 test + shuffled-global。
+
 ### Predictive V1 first results (window, 2026-09-18 night)
 
 > **V1.1 code audit:** P1/P2/P3 val/test used **stochastic masked inference**
