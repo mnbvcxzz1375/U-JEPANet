@@ -92,7 +92,36 @@ C3R − A0DA:  −0.000 (s42) / +0.002 (s43)
 C4P − C3R:   +0.002 (s42; paired weak/strong now slightly above C3R)
 ```
 
-## Predictive V1 first results (window, 2026-09-18 night)
+## V1.2 R1/R2 complete (window test, code f40d754 / V1.2-corrected)
+
+Graph: full-context seg `F3=E3(F2*)`; aux L_P on original F2 (context live, target sg, masked-only); 384 tokens; deterministic eval.
+
+| Arm | seed | val best | **test window** | host |
+|---|---|---:|---:|---|
+| A0DA | 42 | 0.8183 | 0.8209 | school |
+| A0DA | 43 | 0.8141 | 0.8215 | school |
+| **R1** λp=0 | **42** | 0.8185 | **0.8262** | 40901 |
+| **R1** λp=0 | **43** | 0.8219 | **0.8273** | 40902 |
+| **R2** λp=0.3 | **42** | 0.8225 | **0.8273** | 40902 |
+| **R2** λp=0.3 | **43** | 0.8213 | **0.8268** | A800 385928 |
+
+### Pre-locked gates
+
+| Gate | s42 | s43 | mean | 读法 |
+|---|---:|---:|---:|---|
+| **R2 − R1** (pred loss) | +0.0011 | −0.0005 | **+0.0003** | \|Δ\|<0.002 且方向不一致 → **关闭 local same-crop predictive objective** |
+| **R1 − A0DA** (architecture) | **+0.0053** | **+0.0058** | **+0.0056** | 两 seed 同向 → predictive **bottleneck 进 deep path** 有稳定正贡献 |
+| R2 − A0DA | +0.0064 | +0.0053 | +0.0059 | 与 R1 相近，增益主要来自架构而非 L_P |
+
+`eval_det_maxdiff=0.0` on all four arms.
+
+### 结论（预锁门）
+
+1. **Local same-crop predictive learning 正式结束**（R2≈R1）。
+2. **V1.2 架构（predictor 在 deep path）相对 A0DA 双 seed +0.005~0.006**，不是随机 mask 假象。
+3. 下一主线：**V3 G0/G1/G2 Global→Local**（信息增量），不要再调 λp / block mask 作为优先项。
+
+### Predictive V1 first results (window, 2026-09-18 night)
 
 > **V1.1 code audit:** P1/P2/P3 val/test used **stochastic masked inference**
 > (`train_mode` defaulted True; `model.eval()` did not force full-context).

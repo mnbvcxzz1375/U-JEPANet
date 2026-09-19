@@ -1,30 +1,15 @@
 #!/bin/bash
-# V1.2 R1/R2 on one GPU. Usage: bash run_r_v12.sh GPU ARM SEED
+# Run only official test for a finished V1.2 checkpoint
 set -euo pipefail
-GPU=${1:?gpu}
-ARM=${2:?R1|R2}
-SEED=${3:-42}
 ROOT=/data/hyc/U-JEPANet
 PY=/home/ubuntu/anaconda3/envs/vllmenv/bin/python
-export PYTHONPATH=$ROOT PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU
+export PYTHONPATH=$ROOT PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=${GPU:-0}
 export PYTORCH_ALLOC_CONF=expandable_segments:True
+ARM=${1:?R1|R2}
+SEED=${2:-42}
+OUT=${3:-$ROOT/runs/predictive_v12/${ARM}_s${SEED}}
 WORD=/data/hyc/PLS4MIS/code/datasets/WORD
 SPLIT=$ROOT/data/splits_sll20
-OUT=$ROOT/runs/predictive_v12/${ARM}_s${SEED}
-CACHE=/tmp/ujepa_hu_${ARM}_${SEED}_$$
-mkdir -p "$OUT" "$CACHE" "$ROOT/runs/predictive_v12"
-echo "host=$(hostname) arm=$ARM seed=$SEED gpu=$GPU code=V1.2"
-"$PY" "$ROOT/scripts/train_predictive_v11.py" \
-  --arm "$ARM" \
-  --word-root "$WORD" \
-  --split-dir "$SPLIT" \
-  --cache-dir "$CACHE" \
-  --out "$OUT" \
-  --steps 30000 --batch 2 --device cuda --seed "$SEED" \
-  --intensity-mode window --target-tokens 384 \
-  2>&1 | tee "$OUT/train.log"
-echo "TRAIN_DONE $OUT"
-# deterministic window official test
 W=$ROOT/runs/official_test_20260917/window
 mkdir -p "$W"
 "$PY" - <<PY
@@ -50,13 +35,12 @@ model=PredictiveUNet(
 )
 model.load_state_dict(ck["model"])
 model=model.cuda().eval()
-# determinism check
 x0=torch.randn(1,1,64,64,48, device="cuda")
 with torch.no_grad():
     y1,y2=model(x0),model(x0)
-if isinstance(y1, (list, tuple)):
-    y1, y2 = y1[0], y2[0]
-print("eval_det_maxdiff", float((y1-y2).abs().max()))
+if isinstance(y1,(list,tuple)):
+    y1,y2=y1[0],y2[0]
+print("eval_det_maxdiff", float((y1-y2).abs().max()), "VAL_BEST", ck.get("best_val"))
 ids=[ln.strip() for ln in Path("$SPLIT/test_30.txt").read_text().splitlines() if ln.strip()]
 root=Path("$WORD")
 acc={c:[] for c in range(1,17)}
@@ -80,11 +64,8 @@ Path("$W/test_${ARM}_s${SEED}_v12_window.json").write_text(json.dumps({
   "arms":{"P":{"per_organ":per}},
   "arm":"$ARM","seed":$SEED,"code":"V1.2-corrected",
   "intensity_mode":"window",
-  "note":"full-context seg path; F3=E3(F2*); masked-only aux loss",
   "best_val": ck.get("best_val"),
   "per_case": per_case,
 }, indent=2))
 print("TEST_ALL", per["ALL"])
-print("VAL_BEST", ck.get("best_val"))
 PY
-echo "TEST_DONE $ARM s$SEED"
