@@ -72,9 +72,11 @@ def main():
     val_ids = _read_id_list(split / "val_20.txt")
 
     need_global = arm in ("G1", "G2")
+    # unique cache per job/arm/seed to avoid multi-process npy races
+    cache_dir = Path(args.cache_dir) / f"{arm}_s{args.seed}"
     ds = DynamicWordVolumeDataset(
         args.word_root, labeled, (128, 128, 96), labeled=True, seed=args.seed,
-        mode="seg", strength=1.0, cache_dir=args.cache_dir, fg_crop_prob=0.7,
+        mode="seg", strength=1.0, cache_dir=cache_dir, fg_crop_prob=0.7,
         return_crop_meta=True,
         return_global=need_global,
         global_size=(64, 64, 64),

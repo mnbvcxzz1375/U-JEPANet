@@ -24,11 +24,17 @@ from .unet3d import UNet3D
 
 
 class GlobalStem(nn.Module):
-    """Lightweight 3D CNN → ~8^3 global tokens with whole-volume PE."""
+    """Global tokens = optional image features + whole-volume PE.
+
+    G0: position_only() → PE-only tokens (no patient image content)
+    G1/G2: forward(X_G) → E_G(X_G) + PE
+    Same module always instantiated so G0/G1 init RNG order matches.
+    """
 
     def __init__(self, embed_dim: int = 256, grid: Tuple[int, int, int] = (8, 8, 8)):
         super().__init__()
         self.grid = grid
+        self.embed_dim = embed_dim
         self.stem = nn.Sequential(
             nn.Conv3d(1, 16, 3, stride=2, padding=1),
             nn.InstanceNorm3d(16),
@@ -48,19 +54,26 @@ class GlobalStem(nn.Module):
         ys = (torch.arange(gh, dtype=torch.float32) + 0.5) / gh
         xs = (torch.arange(gw, dtype=torch.float32) + 0.5) / gw
         zz, yy, xx = torch.meshgrid(zs, ys, xs, indexing="ij")
-        pe = torch.stack([zz, yy, xx], dim=-1).reshape(-1, 3)  # (N,3) zyx in [0,1]
+        pe = torch.stack([zz, yy, xx], dim=-1).reshape(-1, 3)
         self.register_buffer("pe_grid", pe, persistent=False)
 
+    def _pe(self, batch: int, device, dtype) -> torch.Tensor:
+        pe = self.pe_mlp(self.pe_grid.to(device=device, dtype=dtype))
+        return pe.unsqueeze(0).expand(batch, -1, -1)
+
+    def position_only(self, batch: int, device, dtype=torch.float32) -> torch.Tensor:
+        """G0 global state: PE tokens only (atlas-like spatial code, no CT content)."""
+        return self._pe(batch, device, dtype)
+
     def forward(self, x_g: torch.Tensor) -> torch.Tensor:
-        # x_g: (B,1,D,H,W)
         if x_g.dim() == 4:
             x_g = x_g.unsqueeze(1)
         h = self.stem(x_g)
         h = F.adaptive_avg_pool3d(h, self.grid)
         h = self.proj(h)
-        tok = tokens_from_volume(h)  # (B,N,C)
-        pe = self.pe_mlp(self.pe_grid.to(tok.device, tok.dtype))  # (N,C)
-        return self.norm(tok + pe.unsqueeze(0))
+        tok = tokens_from_volume(h)
+        pe = self._pe(tok.shape[0], tok.device, tok.dtype)
+        return self.norm(tok + pe)
 
 
 class CoordAtlas(nn.Module):
@@ -144,10 +157,12 @@ class GLPUNet(nn.Module):
             target_tokens=target_tokens,
         )
         self.use_coord = self.arm != "R1"
-        self.use_global = self.arm in ("G1", "G2")
+        # Causal control: G0/G1/G2 ALL instantiate GlobalStem (same RNG/init order).
+        # Only difference: whether Z_G includes patient image content.
+        self.use_global_image = self.arm in ("G1", "G2")  # content path
         self.use_gl_loss = self.arm == "G2"
         self.coord_atlas = CoordAtlas(embed_dim) if self.use_coord else None
-        self.global_stem = GlobalStem(embed_dim, global_grid) if self.use_global else None
+        self.global_stem = GlobalStem(embed_dim, global_grid) if self.use_coord else None
         self.gl_pred = GlobalToLocalPredictor(embed_dim, num_heads, n_blocks=2) if self.use_coord else None
         merge_in = embed_dim * 2 if self.use_coord else 0
         self.gl_merge = nn.Conv3d(merge_in, ch, kernel_size=1) if self.use_coord else None
@@ -213,14 +228,18 @@ class GLPUNet(nn.Module):
             q = self.coord_atlas(cfeat)
 
             z_g = None
-            if self.use_global and global_image is not None:
-                z_g = self.global_stem(global_image)
-                if shuffle_global:
-                    if shuffle_global_ids is not None:
-                        z_g = z_g[shuffle_global_ids]
-                    elif b > 1:
-                        z_g = torch.roll(z_g, shifts=1, dims=0)
-                    # b==1 without ids: cannot shuffle — caller must pass other-case Z_G
+            if self.use_coord and self.global_stem is not None:
+                # Causal G0 vs G1: same predictor path; only Z_G content differs.
+                if self.use_global_image and global_image is not None:
+                    z_g = self.global_stem(global_image)
+                    if shuffle_global:
+                        if shuffle_global_ids is not None:
+                            z_g = z_g[shuffle_global_ids]
+                        elif b > 1:
+                            z_g = torch.roll(z_g, shifts=1, dims=0)
+                else:
+                    # G0 (or G1/G2 without image at train-step edge): PE-only tokens
+                    z_g = self.global_stem.position_only(b, device, dtype=cfeat.dtype)
             zhat = self.gl_pred(q, z_g)
             r_gl = z_l - zhat
             d, h, w = spatial
