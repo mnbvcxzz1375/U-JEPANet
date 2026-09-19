@@ -1,39 +1,23 @@
-# V3.2 Aligned Global Innovation — auto-review, not launched
+# V3.2 P0/P1 fixes — tests ALL_PASS, launch authorized after review
 
-User brief after `948ed7f`. **Training not started** until user review.
+## Fixes (user review of fe008f6)
 
-## Design locked
-
-- **I = P(q, Z_G) − P(q, Z_PE)** with **shared** head P (causal patient innovation).
-- Hard **GridSample** at p_i (patient voxel frame; FOV audit → not raw DICOM origin).
-- Fusion: **A(I) only**, RMS-normalized; **α0=0.04** (≈4% RMS, not raw 0.05).
-- H0/H1 same params/init; B0 = **A0DA_GLP** isolated-loader control.
-- Closed: old G2 / L_GL; no story claiming stable R1 +0.0056.
-
-## Auto-review (2026-09-19)
-
-| | |
+| ID | Fix |
 |---|---|
-| Design checklist | **19 PASS** |
-| Unit tests 40901 | **ALL_V32_TESTS_PASS** |
-| H0 S_pre | **0.0** (PE-only both sides) |
-| H1 S_pre | **~0.66** (distinct global content) |
-| S_fuse at α=0.04 | **~0.04** |
-| WARN | R1 trajectory-sensitive; no launch; shuffle=real WORD pairs |
+| **P0** B0 val crash | `train_v32.py`: A0DA uses `evaluate_word_whole_volume` (plain UNet3D) |
+| **P0** batch RMS | `rms_norm_delta` **per-sample** RMS_b |
+| **P1** coarse align | coarse map also **GridSample @ p_i** |
+| **P1** H0≡R1 | `innov_merge(..., bias=False)`; I=0 ⇒ Δ=0 |
 
-## Proposed launch (after user OK)
+## Tests (40901) ALL_V32_TESTS_PASS
 
-| Host | Arm |
-|---|---|
-| 40901 | B0 A0DA_GLP s42 |
-| 40902 | H1 s42 |
-| school | H0 s43 / H1 s43 / A0DA_GLP s43 |
+- B0 plain UNet val callable
+- per-sample RMS independence
+- coarse GridSample token count
+- innov_merge bias=False + H0 S_pre/S_fuse=0
+- H0 ≡ R1 forward (atol 1e-4)
+- + prior init match / H0 I=0 / H1 S_pre>0 / S_fuse≈α
 
-Gate: **H1−H0 val** ≳+0.003 both seeds + real-case shuffle evidence.
+## Launch
 
-## Files
-
-- `ujepa/aligned_global_innovation.py`
-- `scripts/train_v32.py`
-- `tests/test_v32_innovation.py`
-- `scripts/auto_review_v32.py`
+B0/H0/H1 × s42/s43 after user OK; gate H1−H0 val ≳+0.003 + real-case shuffle.

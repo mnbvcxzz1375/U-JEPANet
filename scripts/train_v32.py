@@ -26,6 +26,7 @@ from ujepa.dynamic_dataset import DynamicWordVolumeDataset
 from ujepa.glp_eval import evaluate_word_whole_volume_glp
 from ujepa.losses import deep_supervision_loss, dice_ce_loss
 from ujepa.unet3d import UNet3D
+from ujepa.whole_volume_eval import evaluate_word_whole_volume
 
 
 def collate(b):
@@ -150,19 +151,18 @@ def main():
 
         if step % args.val_every == 0 or step == args.steps:
             model.eval()
-            if is_v32 or arm == "R1":
+            if arm == "A0DA":
+                # P0: plain UNet3D.forward(x) — do not call GLP kwargs
+                vm = evaluate_word_whole_volume(
+                    model, args.word_root, val_ids, 17, (128, 128, 96), (64, 64, 48), device,
+                    intensity_mode=args.intensity_mode,
+                )
+            else:
                 need_g = arm == "H1"
                 vm = evaluate_word_whole_volume_glp(
                     model, args.word_root, val_ids, 17, (128, 128, 96), (64, 64, 48), device,
                     intensity_mode=args.intensity_mode,
                     need_global=need_g,
-                )
-            else:
-                # A0DA: plain window val via glp_eval with identity (origins only)
-                vm = evaluate_word_whole_volume_glp(
-                    model, args.word_root, val_ids, 17, (128, 128, 96), (64, 64, 48), device,
-                    intensity_mode=args.intensity_mode,
-                    need_global=False,
                 )
             md = vm["mean_fg_dice"]
             history.append({"step": step, "mean_fg_dice": md,

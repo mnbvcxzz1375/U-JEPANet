@@ -149,9 +149,14 @@ class ExpectationHead(nn.Module):
 
 
 def rms_norm_delta(delta: torch.Tensor, ref: torch.Tensor, stop_grad_scale: bool = True) -> torch.Tensor:
-    """tildeΔ = Δ * RMS(ref) / (RMS(Δ)+eps); optional stop-grad on scale."""
-    rms_d = delta.pow(2).mean().sqrt()
-    rms_r = ref.pow(2).mean().sqrt()
+    """Per-sample RMS: tildeΔ_b = Δ_b * RMS(ref_b) / (RMS(Δ_b)+eps).
+
+    P0: scale must not mix patients in the batch; α=0.04 means ~4% RMS **per case**.
+    """
+    # delta, ref: (B,C,D,H,W)
+    dims = tuple(range(1, delta.dim()))
+    rms_d = delta.pow(2).mean(dim=dims).sqrt().view(-1, *([1] * (delta.dim() - 1)))
+    rms_r = ref.pow(2).mean(dim=dims).sqrt().view(-1, *([1] * (ref.dim() - 1)))
     if stop_grad_scale:
         scale = (rms_r / (rms_d + 1e-6)).detach()
     else:
@@ -211,7 +216,8 @@ class V32UNet(nn.Module):
             self.atlas = PEAtlas(embed_dim)
             # Single shared P for causal I = P(q,Z_G) - P(q,Z_PE)
             self.exp_head = ExpectationHead(embed_dim)
-            self.innov_merge = nn.Conv3d(embed_dim, ch, kernel_size=1)
+            # P1: bias=False so I=0 ⇒ Δ=0 ⇒ H0 ≡ R1 (when weights match)
+            self.innov_merge = nn.Conv3d(embed_dim, ch, kernel_size=1, bias=False)
             self.alpha_g = nn.Parameter(torch.tensor(float(alpha_init)))
             self.local_tok_proj = nn.Conv3d(ch, embed_dim, 1)
             self.local_tok_norm = nn.LayerNorm(embed_dim)
@@ -274,9 +280,13 @@ class V32UNet(nn.Module):
         # PE-only global slots (Z_PE): zeros in image feature channels
         z_pe = torch.zeros(b, self.embed_dim, *self.global_map.map_size, device=device)
         g_pe, _ = gridsample_global(z_pe, grid, crop_origin, full_shape, tuple(patch_size), affine_theta)
-        g_pe_c = self._tokens(F.adaptive_avg_pool3d(z_pe, (max(1, grid[0] // 2), max(1, grid[1] // 2), max(1, grid[2] // 2))))
-        if g_pe_c.shape[1] != g_pe.shape[1]:
-            g_pe_c = F.interpolate(g_pe_c.transpose(1, 2), size=g_pe.shape[1], mode="linear", align_corners=False).transpose(1, 2)
+        # P1: coarse branch also GridSample at same p_i (not flatten+1D interp)
+        z_pe_coarse = F.adaptive_avg_pool3d(
+            z_pe, (max(1, self.global_map.map_size[0] // 2),
+                   max(1, self.global_map.map_size[1] // 2),
+                   max(1, self.global_map.map_size[2] // 2))
+        )
+        g_pe_c, _ = gridsample_global(z_pe_coarse, grid, crop_origin, full_shape, tuple(patch_size), affine_theta)
         g_pe_pool = z_pe.mean(dim=(2, 3, 4))
         # Patient image global (H1) or same PE slots (H0)
         if self.use_image_global and global_image is not None:
@@ -289,9 +299,12 @@ class V32UNet(nn.Module):
         else:
             G = z_pe
         g_fine, _ = gridsample_global(G, grid, crop_origin, full_shape, tuple(patch_size), affine_theta)
-        g_c = self._tokens(F.adaptive_avg_pool3d(G, (max(1, grid[0] // 2), max(1, grid[1] // 2), max(1, grid[2] // 2))))
-        if g_c.shape[1] != g_fine.shape[1]:
-            g_c = F.interpolate(g_c.transpose(1, 2), size=g_fine.shape[1], mode="linear", align_corners=False).transpose(1, 2)
+        G_coarse = F.adaptive_avg_pool3d(
+            G, (max(1, self.global_map.map_size[0] // 2),
+                max(1, self.global_map.map_size[1] // 2),
+                max(1, self.global_map.map_size[2] // 2))
+        )
+        g_c, _ = gridsample_global(G_coarse, grid, crop_origin, full_shape, tuple(patch_size), affine_theta)
         g_pool = G.mean(dim=(2, 3, 4))
 
         # Shared P: I = P(q, Z_G) - P(q, Z_PE)
