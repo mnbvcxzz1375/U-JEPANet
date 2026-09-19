@@ -147,6 +147,39 @@ Checkpoints trained on school; **test re-run on 40901** (ckpts pulled locally; q
 - low/high-CNR：test 上 G0 在 high-CNR 更稳；G1 未在 low-CNR 上拉开。
 - **结论：** 不自动开 G2；先查 val 选择是否过拟合 / shuffled-global / 是否把 GLP val 与旧 R1 val 混比。Causal 匹配本身工作正常（val 方向与 test 相反是科学结果，不是配对 bug）。
 
+## R1 under GLP trainer + gate diagnostics (2026-09-19)
+
+Same DataLoader RNG / GLP val / code as G0/G1. α_g=0 (R1 has no coord stack).
+
+| Arm | val s42 | val s43 | **test s42** | **test s43** |
+|---|---:|---:|---:|---:|
+| **R1_GLP** | **0.8184** | **0.8127** | **0.8176** | **0.8196** |
+| G0 | 0.8103 | 0.8074 | **0.8222** | 0.8178 |
+| G1 | 0.8174 | 0.8131 | 0.8213 | 0.8110 |
+| R1_V1.2 (hist.) | 0.8185 | 0.8219 | 0.8262 | 0.8273 |
+
+### Gate G0 − R1_GLP
+
+| | s42 | s43 | mean |
+|---|---:|---:|---:|
+| **val** | **−0.0081** | **−0.0053** | **−0.0067** |
+| **test** | +0.0046 | −0.0018 | **+0.0014** |
+
+- **Val:** G0 明显低于同协议 R1 → PE/coordinate stack 在 val 上有害。
+- **Test:** 混杂（s42 G0 更高，s43 略低）→ **不能**在 test 上断言 stack 必然伤 R1。
+- R1_GLP test 仍低于历史 R1_V1.2 (~0.007–0.009) → trainer/eval 细节差仍在。
+
+### Gate diagnostics (existing ckpts)
+
+| ckpt | α | S_pre | S_fuse | 读法 |
+|---|---:|---:|---:|---|
+| G0 s42 | −0.047 | 0.012* | 0.37 | gate 可开 |
+| G1 s42 | −0.001 | **0.0013** | **0.0018** | content 弱区分 + gate 关死 |
+
+WORD n=150: spacing 齐（z=2.5），**FOV 变化大** → 64³ 为体素 atlas。
+
+**结论：** 当前 G 系列在 test 上未证明 patient-global；val 上 G0 伤 R1。α 饥饿 + 物理未对齐仍是主要假说。下一步 V3.2（aligned + α0=0.05）或继续 R1 线，**不开旧 G2**。
+
 ### Predictive V1 first results (window, 2026-09-18 night)
 
 > **V1.1 code audit:** P1/P2/P3 val/test used **stochastic masked inference**

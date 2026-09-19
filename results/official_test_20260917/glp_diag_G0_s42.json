@@ -1,0 +1,26 @@
+{
+  "arm": "G0",
+  "ckpt": "/data/hyc/U-JEPANet/runs/glp_v3/G0_s42/best.pt",
+  "best_val": null,
+  "alpha_g": -0.04693234711885452,
+  "S_pre": 0.011949397623538971,
+  "S_fuse_at_current_alpha": 0.36769765615463257,
+  "grad_global_stem": {
+    "sum": 1238215.87890625,
+    "n_params_with_grad": 4
+  },
+  "grad_coord_atlas": {
+    "sum": 220841760.0,
+    "n_params_with_grad": 4
+  },
+  "grad_gl_pred": {
+    "sum": 670364171.5707722,
+    "n_params_with_grad": 26
+  },
+  "grad_alpha_g": -8923674.0,
+  "interpretation": {
+    "S_pre~0": "predictor ignores global content",
+    "S_pre>0 & S_fuse~0": "global content differs but gate kills fusion",
+    "S_pre>0 & S_fuse>0": "content reaches F2*; test harm may be real"
+  }
+}
