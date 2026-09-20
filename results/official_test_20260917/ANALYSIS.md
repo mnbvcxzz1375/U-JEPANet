@@ -147,7 +147,44 @@ Checkpoints trained on school; **test re-run on 40901** (ckpts pulled locally; q
 - low/high-CNR：test 上 G0 在 high-CNR 更稳；G1 未在 low-CNR 上拉开。
 - **结论：** 不自动开 G2；先查 val 选择是否过拟合 / shuffled-global / 是否把 GLP val 与旧 R1 val 混比。Causal 匹配本身工作正常（val 方向与 test 相反是科学结果，不是配对 bug）。
 
-## V3.2 B0/H0/H1 interim (window val + partial test)
+## V3.2 complete B0/H0/H1 (window val + official test)
+
+| Arm | seed | val best | **test ALL** | α_final |
+|---|---|---:|---:|---:|
+| B0 A0DA_GLP | 42 | 0.8090 | 0.8099 | — |
+| B0 A0DA_GLP | 43 | 0.8101 | 0.8131 | — |
+| **H0 PE-only** | 42 | **0.8170** | **0.8191** | 0.04 |
+| **H0 PE-only** | 43 | **0.8121** | **0.8172** | 0.04 |
+| H1 patient-global | 42 | 0.8002 | 0.8047 | **0.24** |
+| H1 patient-global | 43 | 0.8023 | 0.8028 | **0.23** |
+
+### Pre-locked gate H1 − H0
+
+| | s42 | s43 | mean |
+|---|---:|---:|---:|
+| **val** | **−0.0168** | **−0.0098** | **−0.013** |
+| **test** | **−0.0144** | **−0.0144** | **−0.014** |
+
+**门明确失败：** H1 在 val 与 test、两个 seed 上都低于 H0。
+
+H0 − B0（PE-only aligned stack vs plain A0DA_GLP）:
+
+| | s42 | s43 |
+|---|---:|---:|
+| val | +0.008 | +0.002 |
+| test | +0.009 | +0.004 |
+
+H0 略高于 A0DA_GLP（同 RNG 协议）；H1 的 **patient image content** 在 gate 打开（α≈0.24）后仍持续 **降低** Dice。
+
+### 结论（V3.2）
+
+1. **H1−H0 双 seed val/test 均为负** → aligned patient-specific whole-CT innovation **未证明有效**，在本设定下 **有害**。
+2. α 已打开（非 V3.1 饥饿）→ 负结果更可信。
+3. H0≈/略优 A0DA → aligned PE-only 栈本身无明显伤害。
+4. **关闭当前 global-innovation 线**（含 G2-LU）；R1 contextual bottleneck 仍为 trajectory-sensitive；实用默认仍为 **强数据管线 + 简单 U-Net（A0DA 类）**。
+5. WORD test 已是 development；外部验证若需 claim 应另开 AMOS/BTCV/FLARE。
+
+### V3.2 B0/H0/H1 interim (window val + partial test)
 
 P0/P1-fixed code `ff00511`; isolated loader RNG; α0=0.04 per-sample RMS.
 
