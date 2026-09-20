@@ -147,7 +147,33 @@ Checkpoints trained on school; **test re-run on 40901** (ckpts pulled locally; q
 - low/high-CNR：test 上 G0 在 high-CNR 更稳；G1 未在 low-CNR 上拉开。
 - **结论：** 不自动开 G2；先查 val 选择是否过拟合 / shuffled-global / 是否把 GLP val 与旧 R1 val 混比。Causal 匹配本身工作正常（val 方向与 test 相反是科学结果，不是配对 bug）。
 
-## Research story revision (after R1_GLP / 948ed7f review)
+## V3.2 B0/H0/H1 interim (window val + partial test)
+
+P0/P1-fixed code `ff00511`; isolated loader RNG; α0=0.04 per-sample RMS.
+
+| Arm | seed | val best | test ALL | α_final |
+|---|---|---:|---:|---:|
+| **B0 A0DA_GLP** | 42 | 0.8090 | **0.8099** | — |
+| **H1** | 42 | 0.8002 | **0.8047** | **0.24** |
+| **H0** | 43 | **0.8121** | *(school test pending)* | 0.04 |
+| **H1** | 43 | 0.8023 | *(pending)* | **0.24** |
+| **B0 A0DA** | 43 | 0.8101 | *(pending)* | — |
+| H0 | 42 | *(40901 train in flight)* | — | 0.04 init |
+
+### Gate H1 − H0 (available)
+
+| | s42 | s43 |
+|---|---|---:|
+| val | H0 s42 pending | **−0.0098** (0.8023−0.8121) |
+
+- **s43 val: H1 < H0** → 预锁门 **未过**。
+- H1 α 从 0.04 **升到 ~0.24**（gate 打开）但 val 仍低于 H0/A0DA → innovation 注入后 **未带来分割收益**，可能有害。
+- test s42: H1 0.8047 < A0DA 0.8099（−0.005）。
+- B0 A0DA_GLP val ≈ 0.809–0.810，与历史 A0DA window test 0.821 仍有协议/轨迹差；R1 故事仍 trajectory-sensitive。
+
+**暂不自动开 G2 / 不扩大 H1。** 等 H0 s42 + school s43 test 齐后做完整门 + 真实病例 shuffle（若 H1 α 已开，shuffle 应对 Dice 有可测影响）。
+
+### Research story revision (after R1_GLP / 948ed7f review)
 
 **Do not write:** A0DA → R1 **+0.0056 stable** → V3.
 
